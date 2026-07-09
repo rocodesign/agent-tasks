@@ -1,0 +1,29 @@
+name = "agent-tasks"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+routes = [
+  { pattern = "fleet.copaciu.com", custom_domain = true }
+]
+
+# Reaper: marks silent sessions ended + purges old ended rows (see scheduled() in src/index.ts).
+[triggers]
+crons = ["*/10 * * * *"]
+
+# Non-secret config (committed). Override per-env as needed.
+[vars]
+RESEND_FROM = "Fleet <fleet@copaciu.com>"
+ALLOWED_EMAILS = "romeo@copaciu.com"
+
+# Static UI (Vite build output). Served for any path that is not /api/* or /mcp.
+[assets]
+directory = "./ui/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Secrets are NOT stored here.
+#   local dev  -> .dev.vars
+#   production -> wrangler secret put DATABASE_URL
+#                 wrangler secret put RESEND_API_KEY
