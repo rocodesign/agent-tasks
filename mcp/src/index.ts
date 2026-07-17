@@ -28,6 +28,7 @@ const BASE = (process.env.AGENT_TASKS_URL ?? "https://fleet.copaciu.com").replac
 const KEY = process.env.AGENT_TASKS_KEY ?? "";
 const SESSION_ID =
   process.env.AGENT_TASKS_SESSION_ID ?? process.env.CLAUDE_SESSION_ID ?? randomUUID();
+const CONNECT_TIMEOUT_MS = parseConnectTimeout(process.env.AGENT_TASKS_CONNECT_TIMEOUT_MS);
 
 let project = process.env.AGENT_TASKS_PROJECT ?? process.cwd();
 const ICON: Record<string | number, string> = { 0: "◷", 1: "◉", 2: "✓", 3: "✕", completed: "✓", in_progress: "◉", cancelled: "✕", deferred: "⊘", pending: "◷" };
@@ -41,17 +42,38 @@ const server = new McpServer({ name: "agent-tasks", version: "0.1.0" }, { instru
 
 type TaskInput = { name: string; status: number | string };
 
-let pendingIngest: { tasks: TaskInput[]; project?: string; title?: string; sessionStatus?: string } | null = null;
-let ingestTimeout: NodeJS.Timeout | null = null;
-const INGEST_DEBOUNCE_MS = 2000;
-
 function authHeaders(extra?: Record<string, string>) {
   return { authorization: `Bearer ${KEY}`, ...extra };
 }
 
+function parseConnectTimeout(value: string | undefined): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 5000;
+}
+
+async function requireBackendConnection(): Promise<void> {
+  if (!KEY) throw new Error("AGENT_TASKS_KEY is not set");
+
+  let response: Response;
+  try {
+    response = await fetch(`${BASE}/api/version`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new Error(`cannot reach ${BASE}: ${String(error)}`);
+  }
+
+  if (!response.ok) {
+    // Consume the response before exiting so keep-alive resources can be released.
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`connection check failed: HTTP ${response.status}`);
+  }
+}
+
 async function ingestDirect(
   tasks: TaskInput[],
-  opts: { project?: string; title?: string; sessionStatus?: string } = {},
+  opts: { project?: string; title?: string; sessionStatus?: string | number } = {},
 ): Promise<{ ok: boolean; status?: number; text?: string; error?: string }> {
   if (!KEY) return { ok: false, error: "AGENT_TASKS_KEY is not set" };
   const payload = {
@@ -73,31 +95,9 @@ async function ingestDirect(
 
 async function ingest(
   tasks: TaskInput[],
-  opts: { project?: string; title?: string; sessionStatus?: string } = {},
-): Promise<void> {
-  if (!KEY) {
-    console.error("[agent-tasks] AGENT_TASKS_KEY is not set");
-    return;
-  }
-  
-  pendingIngest = { tasks, project: opts.project, title: opts.title, sessionStatus: opts.sessionStatus };
-  
-  if (ingestTimeout) clearTimeout(ingestTimeout);
-  
-  ingestTimeout = setTimeout(async () => {
-    const pending = pendingIngest;
-    pendingIngest = null;
-    if (pending) {
-      const r = await ingestDirect(pending.tasks, {
-        project: pending.project,
-        title: pending.title,
-        sessionStatus: pending.sessionStatus,
-      });
-      if (!r.ok) {
-        console.error(`[agent-tasks] Ingest failed: ${r.error ?? `${r.status} ${r.text}`}`);
-      }
-    }
-  }, INGEST_DEBOUNCE_MS);
+  opts: { project?: string; title?: string; sessionStatus?: string | number } = {},
+) {
+  return ingestDirect(tasks, opts);
 }
 
 // ---- report_tasks ---------------------------------------------------------
@@ -224,7 +224,10 @@ server.registerTool(
 );
 
 async function main() {
-  if (!KEY) console.error("[agent-tasks-mcp] warning: AGENT_TASKS_KEY is not set; tools will fail until it is.");
+  // Do not open the MCP transport until the authenticated backend is available.
+  // Until server.connect runs, the client receives no instructions, capabilities, or
+  // tool definitions, so a disconnected instance advertises no functionality.
+  await requireBackendConnection();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(`[agent-tasks-mcp] connected. base=${BASE} session=${SESSION_ID}`);

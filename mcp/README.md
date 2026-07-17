@@ -12,6 +12,11 @@ The server's `instructions` (surfaced to the model on connect) tell it to keep i
 **internal TodoWrite task-list widget** and the **remote dashboard** in sync: same
 names, same statuses, one `in_progress` at a time, full snapshot on every change.
 
+The local server fails closed: before opening its MCP transport, it makes an
+authenticated request to the dashboard. If the key is missing, authentication fails,
+or the dashboard cannot be reached, the process exits without advertising instructions,
+capabilities, or tools to the MCP client.
+
 ## Tools
 
 | Tool | Purpose |
@@ -82,3 +87,4 @@ claude mcp add --transport http agent-tasks https://fleet.copaciu.com/mcp \
 | `AGENT_TASKS_SESSION_ID` | `CLAUDE_SESSION_ID` or random | Stable id for this session. |
 | `AGENT_TASKS_PROJECT` | `process.cwd()` | Project/cwd label shown on the card. |
 | `AGENT_TASKS_LABEL` | — | Optional machine label. |
+| `AGENT_TASKS_CONNECT_TIMEOUT_MS` | `5000` | Startup connection-check timeout. |
