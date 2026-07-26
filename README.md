@@ -7,9 +7,8 @@ dashboard shows the hierarchy **Machine (source) → Session → Tasks**.
 - **Storage:** standard Postgres via Drizzle (Neon as the provider) — portable, no vendor extensions
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
 - **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`). Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
-- **Agent integration:** deterministic Claude Code hooks mirror native `TodoWrite`,
-  `TaskCreate`, and `TaskUpdate` events. No MCP tools, model instructions, or reporting
-  tool calls are added to the conversation.
+- **Agent integration:** the separate `rococode` plugin reports Claude Code and
+  Codex lifecycle/task events to this API through silent deterministic hooks.
 
 ## Layout
 
@@ -22,8 +21,6 @@ src/
     schema.ts       accounts / api_keys / verification / machines / sessions / tasks / dismissals
     client.ts       the ONLY driver touch point (swap to migrate vendors)
 ui/                 Vite + React + Tailwind dashboard -> builds to ui/dist
-hooks/              token-free Claude Code plugin hooks and tests
-.claude-plugin/     plugin manifest
 drizzle.config.ts   migrations (reads DATABASE_URL from .env)
 ```
 
@@ -49,21 +46,19 @@ the app mints an API key tied to your email and stores it in the browser. Click
 **agent key** in the top bar to copy it into `AGENT_TASKS_KEY`. Hooks and
 the UI both authenticate with that key; all data is scoped to the account.
 
-## Claude Code hook setup
+## Agent hook contract
 
-Clone this repository and load it as a Claude Code plugin, then expose the API key
-to the Claude Code process:
+The cross-agent reporter is distributed by the `rococode` plugin rather than this
+service repository. Expose the API key to Claude Code and Codex:
 
 ```sh
 export AGENT_TASKS_KEY="<agent key copied from the dashboard>"
 export AGENT_TASKS_URL="https://fleet.copaciu.com" # optional; this is the default
-claude --plugin-dir /path/to/agent-tasks
 ```
 
-The plugin listens to `SessionStart`, `TodoWrite`, `TaskCreated`, `TaskUpdate`,
-`TaskCompleted`, and `SessionEnd`. Its command handler is deterministic and silent.
-It never returns hook context, registers a model-facing tool, or asks a model to
-report anything. Network reporting therefore consumes zero model tokens.
+The reporter calls `/api/session/start`, `/api/ingest`, and `/api/session/end`.
+It registers no MCP server, model-facing tool, skill, or instructions, so reporting
+consumes zero model tokens.
 
 Optional environment variables:
 
@@ -72,7 +67,7 @@ Optional environment variables:
 | `AGENT_TASKS_MACHINE` | OS hostname | Stable machine id |
 | `AGENT_TASKS_LABEL` | none | Human-friendly machine label |
 | `AGENT_TASKS_HOOK_TIMEOUT_MS` | `3000` | REST request timeout |
-| `AGENT_TASKS_STATE_DIR` | OS temp directory | Override local task snapshot storage |
+| `AGENT_TASKS_STATE_DIR` | OS temp directory | Override reporter snapshot storage |
 
 ## Setup
 
