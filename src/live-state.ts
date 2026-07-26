@@ -467,8 +467,11 @@ function dismissLive(account: DurableState["accounts"][string], body: any) {
 }
 
 function removeLive(account: DurableState["accounts"][string], sessionId: string): void {
-  for (const machine of Object.values(account.machines)) {
+  for (const [machineId, machine] of Object.entries(account.machines)) {
     delete machine.sessions[sessionId];
+    if (Object.keys(machine.sessions).length === 0) {
+      delete account.machines[machineId];
+    }
   }
   account.version = Date.now();
 }
@@ -483,6 +486,7 @@ function findSession(account: DurableState["accounts"][string], sessionId: strin
 
 function buildLiveTree(account: DurableState["accounts"][string], email: string) {
   return Object.values(account.machines)
+    .filter((machine) => Object.keys(machine.sessions).length > 0)
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
     .map((machine) => ({
       ...machine,
