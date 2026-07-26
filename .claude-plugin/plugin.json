@@ -1,0 +1,8 @@
+{
+  "name": "agent-tasks",
+  "version": "0.2.0",
+  "description": "Mirror Claude Code sessions and native tasks to agent-tasks using deterministic hooks only.",
+  "author": {
+    "name": "rocodesign"
+  }
+}

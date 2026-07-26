@@ -9,8 +9,6 @@ import {
   computeVersion,
   dismissTask,
   listDismissals,
-  listSessionTasks,
-  updateTaskStatus,
   endSession,
   endLatestSession,
   startSession,
@@ -28,8 +26,6 @@ import {
   OTP_TTL_MS,
   OTP_MAX_ATTEMPTS,
 } from "./auth";
-import { handleMcp } from "./mcp";
-import { instructions } from "./instructions";
 
 type Bindings = {
   DATABASE_URL: string;
@@ -43,7 +39,6 @@ type Variables = { email: string };
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 app.use("/api/*", cors());
-app.use("/mcp", cors());
 
 // ---- API key auth for data endpoints (auth routes excluded) ---------------
 app.use("/api/*", async (c, next) => {
@@ -58,11 +53,6 @@ app.use("/api/*", async (c, next) => {
 
 // ---- Public ---------------------------------------------------------------
 app.get("/health", (c) => c.json({ ok: true }));
-
-app.get("/instructions", (c) => {
-  const url = new URL(c.req.url);
-  return c.text(instructions(`${url.protocol}//${url.host}`));
-});
 
 // ---- Auth: email OTP -> minted API key ------------------------------------
 app.post("/api/auth/request-otp", async (c) => {
@@ -166,26 +156,6 @@ app.get("/api/tree", async (c) => {
   return c.json({ machines: await buildTree(db, c.get("email")) });
 });
 
-// ---- Single-session task API (used by the session-bound MCP) --------------
-app.get("/api/tasks", async (c) => {
-  const db = createDb(c.env.DATABASE_URL);
-  const sessionId = c.req.query("sessionId");
-  if (!sessionId) return c.json({ error: "sessionId required" }, 400);
-  return c.json({ tasks: await listSessionTasks(db, c.get("email"), sessionId) });
-});
-
-app.post("/api/tasks/update", async (c) => {
-  const db = createDb(c.env.DATABASE_URL);
-  const body = await c.req.json().catch(() => ({}));
-  const sessionId = String(body?.sessionId ?? "");
-  const name = String(body?.name ?? "");
-  const status = body?.status;
-  if (!sessionId || !name || !status) return c.json({ error: "sessionId, name and status are required" }, 400);
-  const r = await updateTaskStatus(db, c.get("email"), sessionId, name, status);
-  if (r.error) return c.json({ error: r.error }, 404);
-  return c.json({ ok: true, status: r.status, deferred: r.deferred });
-});
-
 // Register a session up front (e.g. from a SessionStart hook) so it shows on the
 // dashboard immediately, even before any task is reported.
 app.post("/api/session/start", async (c) => {
@@ -214,9 +184,6 @@ app.post("/api/session/end", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const sessionId = String(body?.sessionId ?? "");
   const machineId = String(body?.machineId ?? body?.machine?.id ?? "");
-  // Default to "hook" (this endpoint's main caller is the SessionEnd hook); a client that
-  // ends itself deliberately can pass reason:"tool". The hosted MCP's end_session tool calls
-  // the store directly and is already attributed "tool".
   const reason = String(body?.reason ?? "hook");
   if (sessionId) {
     await endSession(db, c.get("email"), sessionId, reason);
@@ -241,16 +208,12 @@ app.post("/api/session/remove", async (c) => {
 
 app.all("/api/*", (c) => c.json({ error: "not_found" }, 404));
 
-// ---- Remote MCP (Streamable HTTP, JSON-RPC) -------------------------------
-app.post("/mcp", (c) => handleMcp(c));
-app.get("/mcp", (c) => c.json({ error: "method_not_allowed; POST JSON-RPC" }, 405, { Allow: "POST" }));
-
 // ---- Static UI (SPA) ------------------------------------------------------
 app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 // ---- Scheduled reaper (cron; see [triggers] in wrangler.toml) --------------
-// Sessions only become "ended" when something explicitly says so (the model's end_session
-// tool or a SessionEnd hook). A process that's killed/headless can't do either, so without
+// Sessions only become "ended" when a SessionEnd hook says so. A process that's
+// killed/headless can't do that, so without
 // this they'd sit "active" forever. This sweep ends silent sessions and purges old ones.
 async function scheduled(_event: ScheduledController, env: Bindings, ctx: ExecutionContext) {
   ctx.waitUntil(

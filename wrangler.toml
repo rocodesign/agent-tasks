@@ -17,7 +17,7 @@ crons = ["*/10 * * * *"]
 RESEND_FROM = "Fleet <fleet@copaciu.com>"
 ALLOWED_EMAILS = "romeo@copaciu.com"
 
-# Static UI (Vite build output). Served for any path that is not /api/* or /mcp.
+# Static UI (Vite build output). Served for any path that is not /api/*.
 [assets]
 directory = "./ui/dist"
 binding = "ASSETS"

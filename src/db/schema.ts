@@ -65,7 +65,7 @@ export const sessions = pgTable(
     project: text("project"),
     title: text("title"),
     status: text("status").notNull().default("active"), // active | idle | ended
-    endedReason: text("ended_reason"), // null while live; tool | hook | reaper once ended
+    endedReason: text("ended_reason"), // null while live; hook | reaper once ended
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

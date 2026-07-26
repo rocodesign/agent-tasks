@@ -197,7 +197,7 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: () => voi
                 setCopied(true);
                 setTimeout(() => setCopied(false), 1500);
               }}
-              title="Copy your agent key (paste into the MCP server or skill config)"
+              title="Copy your agent key (set it as AGENT_TASKS_KEY for the hook)"
               className="rounded-[7px] border border-edge-3 bg-transparent px-[11px] py-[5px] font-mono text-[11.5px] tracking-[0.02em] text-fg-4 hover:border-[#3a3a3a] hover:bg-surface-3 hover:text-fg-2"
             >
               {copied ? "copied ✓" : "agent key"}
@@ -451,11 +451,8 @@ function EmptyState() {
     <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-fg-6">
       <div className="text-[15px] font-medium text-fg-4">No agents reporting yet</div>
       <div className="max-w-[360px] text-[12.5px] leading-[1.6]">
-        Point an agent at <span className="font-mono text-fg-5">POST /api/ingest</span> — see{" "}
-        <a href="/instructions" className="font-mono text-fg-5 underline hover:text-fg-2">
-          /instructions
-        </a>{" "}
-        to get started.
+        Install the hook plugin and set{" "}
+        <span className="font-mono text-fg-5">AGENT_TASKS_KEY</span> to get started.
       </div>
     </div>
   );

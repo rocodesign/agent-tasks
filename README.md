@@ -7,23 +7,23 @@ dashboard shows the hierarchy **Machine (source) → Session → Tasks**.
 - **Storage:** standard Postgres via Drizzle (Neon as the provider) — portable, no vendor extensions
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
 - **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`). Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
-- **Agent integration:** the `skill/agent-tasks-report` skill, the local `mcp/` stdio server, or the **hosted MCP** at `/mcp` (all tell the model to mirror its internal TodoWrite widget)
+- **Agent integration:** deterministic Claude Code hooks mirror native `TodoWrite`,
+  `TaskCreate`, and `TaskUpdate` events. No MCP tools, model instructions, or reporting
+  tool calls are added to the conversation.
 
 ## Layout
 
 ```
 src/
-  index.ts          Hono app: routes (auth, ingest, read, /mcp), serves the SPA
+  index.ts          Hono app: auth, ingest, session, and read routes; serves the SPA
   store.ts          account-scoped DB logic (ingest/tree/version/dismiss)
   auth.ts           email OTP, Resend send, API-key mint/hash, allowlist
-  mcp.ts            hosted MCP over Streamable HTTP (JSON-RPC), reuses store.ts
   db/
     schema.ts       accounts / api_keys / verification / machines / sessions / tasks / dismissals
     client.ts       the ONLY driver touch point (swap to migrate vendors)
-  instructions.ts   plain-text agent guide (GET /instructions)
 ui/                 Vite + React + Tailwind dashboard -> builds to ui/dist
-skill/agent-tasks-report/   installable Claude Code skill for agents
-mcp/                MCP server: report_tasks / end_session / view_fleet (see mcp/README.md)
+hooks/              token-free Claude Code plugin hooks and tests
+.claude-plugin/     plugin manifest
 drizzle.config.ts   migrations (reads DATABASE_URL from .env)
 ```
 
@@ -34,19 +34,45 @@ drizzle.config.ts   migrations (reads DATABASE_URL from .env)
 | POST | `/api/auth/request-otp` | no | Email a 6-digit code (allowlisted emails only) |
 | POST | `/api/auth/verify-otp` | no | Verify code → mint + return a per-account API key |
 | POST | `/api/ingest` | yes | Upsert machine+session, replace that session's tasks (full snapshot); returns `dismissed` |
+| POST | `/api/session/start` | yes | Register or resume a hook session |
+| POST | `/api/session/end` | yes | End a hook session |
+| POST | `/api/session/remove` | yes | Permanently remove a session |
 | POST | `/api/dismiss` | yes | User defers a task from the UI (persists across re-ingests) |
 | GET | `/api/dismissals` | yes | Un-acknowledged deferrals for a session |
 | GET | `/api/version` | yes | `max(updated_at)` — cheap "did anything change?" for the poller |
 | GET | `/api/tree` | yes | Full Machine → Session → Tasks hierarchy |
-| POST | `/mcp` | yes | Hosted MCP (Streamable HTTP, JSON-RPC): `report_tasks` / `end_session` / `view_fleet` |
-| GET | `/instructions` | no | Plain-text guide for agents |
 | GET | `/health` | no | Health check |
 | GET | `*` | no | Static SPA |
 
 **Auth model:** sign in at `/` with your email → a 6-digit OTP (sent via Resend) →
 the app mints an API key tied to your email and stores it in the browser. Click
-**agent key** in the top bar to copy it into the MCP server / skill config. Agents and
+**agent key** in the top bar to copy it into `AGENT_TASKS_KEY`. Hooks and
 the UI both authenticate with that key; all data is scoped to the account.
+
+## Claude Code hook setup
+
+Clone this repository and load it as a Claude Code plugin, then expose the API key
+to the Claude Code process:
+
+```sh
+export AGENT_TASKS_KEY="<agent key copied from the dashboard>"
+export AGENT_TASKS_URL="https://fleet.copaciu.com" # optional; this is the default
+claude --plugin-dir /path/to/agent-tasks
+```
+
+The plugin listens to `SessionStart`, `TodoWrite`, `TaskCreated`, `TaskUpdate`,
+`TaskCompleted`, and `SessionEnd`. Its command handler is deterministic and silent.
+It never returns hook context, registers a model-facing tool, or asks a model to
+report anything. Network reporting therefore consumes zero model tokens.
+
+Optional environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AGENT_TASKS_MACHINE` | OS hostname | Stable machine id |
+| `AGENT_TASKS_LABEL` | none | Human-friendly machine label |
+| `AGENT_TASKS_HOOK_TIMEOUT_MS` | `3000` | REST request timeout |
+| `AGENT_TASKS_STATE_DIR` | OS temp directory | Override local task snapshot storage |
 
 ## Setup
 

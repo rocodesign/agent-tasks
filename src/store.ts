@@ -194,13 +194,13 @@ export async function dismissTask(
   return {};
 }
 
-// `reason` records WHY the session ended so the dashboard can tell a clean exit from a
-// timeout: "tool" (model called end_session), "hook" (SessionEnd hook), "reaper" (timed out).
+// `reason` records WHY the session ended so the dashboard can tell a clean hook exit
+// from a timeout: "hook" (SessionEnd hook), "reaper" (timed out).
 export async function endSession(
   db: DB,
   email: string,
   rawSessionId: string,
-  reason: string = "tool",
+  reason: string = "hook",
 ): Promise<{ error?: string }> {
   const sessionId = `${email}::${rawSessionId}`;
   await db
@@ -260,39 +260,6 @@ export async function purgeOldEndedSessions(db: DB): Promise<{ removed: number }
     .where(and(eq(sessions.status, "ended"), lt(sessions.updatedAt, cutoff)))
     .returning({ id: sessions.id });
   return { removed: rows.length };
-}
-
-// Raw (un-namespaced) id of the most-recently-active, non-ended session on a machine,
-// or null. Lets the hosted MCP attach tasks to the session the SessionStart hook created
-// (the MCP never learns the Claude session id, but it knows the machine).
-export async function latestActiveRawSession(
-  db: DB,
-  email: string,
-  rawMachineId: string,
-): Promise<string | null> {
-  const machineId = `${email}::${rawMachineId}`;
-  const rows = await db
-    .select({ id: sessions.id })
-    .from(sessions)
-    .where(and(eq(sessions.accountEmail, email), eq(sessions.machineId, machineId), ne(sessions.status, "ended")))
-    .orderBy(desc(sessions.lastActivityAt))
-    .limit(1);
-  return rows.length ? stripAccount(email, rows[0].id) : null;
-}
-
-// Set a session's display name (title). Agents call this to label what they're working on.
-export async function setSessionTitle(
-  db: DB,
-  email: string,
-  rawSessionId: string,
-  title: string,
-): Promise<{ error?: string }> {
-  const sessionId = `${email}::${rawSessionId}`;
-  await db
-    .update(sessions)
-    .set({ title: title.slice(0, 200), updatedAt: new Date() })
-    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)));
-  return {};
 }
 
 // Register (or re-activate) a session with NO tasks, so it appears on the dashboard the
@@ -364,55 +331,6 @@ export async function startSession(
 export async function removeSession(db: DB, email: string, fullSessionId: string): Promise<{ error?: string }> {
   await db.delete(sessions).where(and(eq(sessions.id, fullSessionId), eq(sessions.accountEmail, email)));
   return {};
-}
-
-// ---- single-session task views (used by the session-bound MCP) ------------
-
-// Only this session's tasks (rawSessionId is namespaced to the account here).
-export async function listSessionTasks(db: DB, email: string, rawSessionId: string) {
-  const sessionId = `${email}::${rawSessionId}`;
-  const rows = await db
-    .select()
-    .from(tasks)
-    .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, sessionId)))
-    .orderBy(asc(tasks.position));
-  return rows.map((r) => ({ name: r.name, status: r.status, position: r.position }));
-}
-
-// Update one task's status in this session. A user dismissal still wins.
-export async function updateTaskStatus(
-  db: DB,
-  email: string,
-  rawSessionId: string,
-  taskName: string,
-  status: unknown,
-): Promise<{ error?: string; status?: string; deferred?: boolean }> {
-  const sessionId = `${email}::${rawSessionId}`;
-  const existing = await db
-    .select({ id: tasks.id })
-    .from(tasks)
-    .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, sessionId), eq(tasks.name, taskName)))
-    .limit(1);
-  if (!existing.length) return { error: "task_not_found" };
-
-  const dis = await db
-    .select({ n: dismissals.taskName })
-    .from(dismissals)
-    .where(and(eq(dismissals.sessionId, sessionId), eq(dismissals.taskName, taskName), isNull(dismissals.acknowledgedAt)))
-    .limit(1);
-  const deferred = dis.length > 0;
-  const finalStatus = deferred ? "deferred" : normalizeTaskStatus(status);
-
-  const now = new Date();
-  await db
-    .update(tasks)
-    .set({ status: finalStatus, updatedAt: now })
-    .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, sessionId), eq(tasks.name, taskName)));
-  await db
-    .update(sessions)
-    .set({ lastActivityAt: now, updatedAt: now })
-    .where(and(eq(sessions.accountEmail, email), eq(sessions.id, sessionId)));
-  return { status: finalStatus, deferred };
 }
 
 // ---- helpers --------------------------------------------------------------

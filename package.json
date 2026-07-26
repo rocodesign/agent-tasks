@@ -15,7 +15,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "typecheck": "tsc -p tsconfig.json",
-    "test:mcp": "npm --prefix mcp test"
+    "test": "npm run typecheck && node --test hooks/*.test.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
