@@ -11,6 +11,7 @@ type Session = {
   title: string | null;
   status: string;
   endedReason: string | null; // tool | hook | reaper once ended; null while live
+  startedAt: string;
   lastActivityAt: string;
   updatedAt: string;
   tasks: Task[];
@@ -368,8 +369,9 @@ function SessionCard({
         {session.tasks.length === 0 && <div className="px-2 py-1 text-[11px] text-fg-6">No tasks reported.</div>}
       </div>
 
-      <div className="text-right text-[11px] tabular-nums text-fg-8">
-        updated {timeAgo(new Date(session.lastActivityAt).getTime())}
+      <div className="flex items-center justify-between text-[11px] tabular-nums text-fg-8">
+        <span>created {detailedTimeAgo(new Date(session.startedAt).getTime())}</span>
+        <span>updated {timeAgo(new Date(session.lastActivityAt).getTime())}</span>
       </div>
     </div>
   );
@@ -640,6 +642,22 @@ function timeAgo(ms: number): string {
   if (m < 60) return `${m}m ago`;
   const h = Math.floor(m / 60);
   return `${h}h ago`;
+}
+
+function detailedTimeAgo(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s ago`;
+
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ago`;
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (totalHours < 24) return `${totalHours}h${minutes ? ` ${minutes}m` : ""} ago`;
+
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return `${days}d${hours ? ` ${hours}h` : ""} ago`;
 }
 
 // Effective status: a session goes STALE after 2h of no activity, unless already ended.
