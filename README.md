@@ -1,10 +1,11 @@
 # agent-tasks
 
-Agents report the tasks they're working on to a shared remote Postgres; a polling
-dashboard shows the hierarchy **Machine (source) → Session → Tasks**.
+Agents report the tasks they're working on to a Cloudflare Durable Object; a
+polling dashboard shows the hierarchy **Machine (source) → Session → Tasks**.
 
 - **API + host:** Cloudflare Workers + [Hono]
-- **Storage:** standard Postgres via Drizzle (Neon as the provider) — portable, no vendor extensions
+- **Live storage:** one SQLite-backed Durable Object; polling and task traffic do not wake Postgres
+- **Archive:** standard Postgres via Drizzle (Neon), flushed hourly and immediately after `SessionEnd`
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
 - **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`). Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
 - **Agent integration:** the separate `rococode` plugin reports Claude Code and
@@ -14,8 +15,9 @@ dashboard shows the hierarchy **Machine (source) → Session → Tasks**.
 
 ```
 src/
-  index.ts          Hono app: auth, ingest, session, and read routes; serves the SPA
-  store.ts          account-scoped DB logic (ingest/tree/version/dismiss)
+  index.ts          Hono adapter: forwards /api to the Durable Object; serves the SPA
+  live-state.ts     deep live-state module: auth, tasks, reads, and archive queue
+  store.ts          Postgres archive adapter
   auth.ts           email OTP, Resend send, API-key mint/hash, allowlist
   db/
     schema.ts       accounts / api_keys / verification / machines / sessions / tasks / dismissals
@@ -36,7 +38,7 @@ drizzle.config.ts   migrations (reads DATABASE_URL from .env)
 | POST | `/api/session/remove` | yes | Permanently remove a session |
 | POST | `/api/dismiss` | yes | User defers a task from the UI (persists across re-ingests) |
 | GET | `/api/dismissals` | yes | Un-acknowledged deferrals for a session |
-| GET | `/api/version` | yes | `max(updated_at)` — cheap "did anything change?" for the poller |
+| GET | `/api/version` | yes | Durable Object version counter for the poller |
 | GET | `/api/tree` | yes | Full Machine → Session → Tasks hierarchy |
 | GET | `/health` | no | Health check |
 | GET | `*` | no | Static SPA |
@@ -76,7 +78,7 @@ Optional environment variables:
 npm install
 npm run ui:install
 
-# 2. create the tables in Neon (reads .env DATABASE_URL)
+# 2. create the archive tables in Neon (reads .env DATABASE_URL)
 npm run db:generate     # generate SQL migration from schema
 npm run db:migrate      # apply it
 #   or, for quick dev: npm run db:push
@@ -86,10 +88,10 @@ npm run dev             # wrangler dev  -> http://localhost:8787  (API)
 npm run ui:dev          # vite          -> http://localhost:5173  (UI, proxies /api)
 ```
 
-Local env lives in `.env` (drizzle migrations: `DATABASE_URL`) and `.dev.vars` (worker
-runtime: `DATABASE_URL`, `RESEND_API_KEY`, `RESEND_FROM`, `ALLOWED_EMAILS`). Both are
-gitignored. To sign in locally, add your email to `ALLOWED_EMAILS`, then use the OTP
-flow at the UI (the code is emailed via Resend).
+Local env lives in `.env` (drizzle migrations: `DATABASE_URL`) and `.dev.vars`
+(worker runtime: `DATABASE_URL`, `RESEND_API_KEY`, `RESEND_FROM`,
+`ALLOWED_EMAILS`, `BOOTSTRAP_API_KEY`). Both are gitignored. `BOOTSTRAP_API_KEY`
+imports an existing agent key into a fresh Durable Object without querying Neon.
 
 ## Deploy
 
@@ -97,6 +99,7 @@ flow at the UI (the code is emailed via Resend).
 # set production secrets once
 npx wrangler secret put DATABASE_URL
 npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put BOOTSTRAP_API_KEY
 # RESEND_FROM and ALLOWED_EMAILS are non-secret [vars] in wrangler.toml
 
 # build UI + deploy worker
@@ -105,9 +108,10 @@ npm run deploy
 
 Serves at `fleet.copaciu.com` (and the `*.workers.dev` URL).
 
-## Portability
+## Live/archive behavior
 
-All database access flows through `src/db/client.ts` + `src/db/schema.ts` using plain
-Postgres. To move off Neon/Cloudflare: change the connection string (any Postgres) and,
-if leaving Workers, swap the driver in `client.ts` (`neon-http` → `node-postgres` /
-`postgres-js`) and add a Node entry point. Hono runs unchanged on Node/Deno/Bun/Lambda.
+Every accepted mutation is persisted to Durable Object storage before the API
+responds. Repeated `/api/ingest` snapshots for the same session coalesce in the
+archive queue. The first dirty mutation schedules an archive alarm for one hour
+later; `SessionEnd` advances that alarm to run immediately. Failed Neon flushes
+remain queued and retry in one hour, while the live API stays available.

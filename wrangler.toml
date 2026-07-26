@@ -8,9 +8,13 @@ routes = [
   { pattern = "fleet.copaciu.com", custom_domain = true }
 ]
 
-# Reaper: marks silent sessions ended + purges old ended rows (see scheduled() in src/index.ts).
-[triggers]
-crons = ["*/10 * * * *"]
+[[durable_objects.bindings]]
+name = "LIVE_STATE"
+class_name = "LiveState"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LiveState"]
 
 # Non-secret config (committed). Override per-env as needed.
 [vars]
@@ -27,3 +31,4 @@ not_found_handling = "single-page-application"
 #   local dev  -> .dev.vars
 #   production -> wrangler secret put DATABASE_URL
 #                 wrangler secret put RESEND_API_KEY
+#                 wrangler secret put BOOTSTRAP_API_KEY
