@@ -64,6 +64,8 @@ export const sessions = pgTable(
       .references(() => machines.id, { onDelete: "cascade" }),
     project: text("project"),
     title: text("title"),
+    summary: text("summary"), // AI-generated post-session digest; null until enriched
+    summarizedAt: timestamp("summarized_at", { withTimezone: true }),
     status: text("status").notNull().default("active"), // active | idle | ended
     endedReason: text("ended_reason"), // null while live; hook | reaper once ended
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
@@ -89,6 +91,7 @@ export const tasks = pgTable(
       .references(() => sessions.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     status: text("status").notNull().default("pending"), // pending | in_progress | completed | cancelled | deferred
+    source: text("source").notNull().default("live"), // live (TodoWrite mirror) | generated (post-session extraction)
     position: integer("position").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

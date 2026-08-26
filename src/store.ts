@@ -79,7 +79,9 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
     return { id: `${sessionId}::${i}`, accountEmail: email, sessionId, name, status, position: i, createdAt: now, updatedAt: now };
   });
 
-  const ops: any[] = [db.delete(tasks).where(eq(tasks.sessionId, sessionId))];
+  // Snapshot replacement only touches the live TodoWrite mirror — post-session
+  // generated tasks are managed by enrichSession and survive re-ingests.
+  const ops: any[] = [db.delete(tasks).where(and(eq(tasks.sessionId, sessionId), ne(tasks.source, "generated")))];
   if (rows.length) ops.push(db.insert(tasks).values(rows));
   await db.batch(ops as any);
 
@@ -255,11 +257,60 @@ export async function reapStaleSessions(db: DB): Promise<{ ended: number }> {
 
 export async function purgeOldEndedSessions(db: DB): Promise<{ removed: number }> {
   const cutoff = new Date(Date.now() - PURGE_ENDED_AFTER_MS);
+  // Summarized sessions are the durable session history the orchestrator reads —
+  // only unsummarized (trivial/unenriched) ended sessions age out.
   const rows = await db
     .delete(sessions)
-    .where(and(eq(sessions.status, "ended"), lt(sessions.updatedAt, cutoff)))
+    .where(and(eq(sessions.status, "ended"), lt(sessions.updatedAt, cutoff), isNull(sessions.summary)))
     .returning({ id: sessions.id });
   return { removed: rows.length };
+}
+
+// Post-session enrichment from the summarizer hook: AI-generated title/summary plus
+// follow-up tasks extracted from the transcript (source "generated", distinct from the
+// live TodoWrite mirror). Update-only: the session row must already exist (SessionEnd
+// flushes the archive queue before the summarizer runs).
+export async function enrichSession(
+  db: DB,
+  email: string,
+  body: any,
+): Promise<{ error?: string; enriched?: string }> {
+  const rawSessionId = String(body?.sessionId ?? "");
+  if (!rawSessionId) return { error: "sessionId required" };
+  const sessionId = `${email}::${rawSessionId}`;
+  const now = new Date();
+
+  const updated = await db
+    .update(sessions)
+    .set({
+      summarizedAt: now,
+      updatedAt: now,
+      ...(body?.summary ? { summary: String(body.summary).slice(0, 8000) } : {}),
+      ...(body?.title ? { title: String(body.title).slice(0, 300) } : {}),
+    })
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)))
+    .returning({ id: sessions.id });
+  if (!updated.length) return { error: "not_found" };
+
+  if (Array.isArray(body?.tasks)) {
+    const rows = body.tasks
+      .map((t: any, i: number) => ({
+        id: `${sessionId}::gen::${i}`,
+        accountEmail: email,
+        sessionId,
+        name: String(t?.name ?? t?.content ?? "").slice(0, 2000),
+        status: normalizeTaskStatus(t?.status),
+        source: "generated",
+        position: i,
+        createdAt: now,
+        updatedAt: now,
+      }))
+      .filter((row: any) => row.name);
+    const ops: any[] = [db.delete(tasks).where(and(eq(tasks.sessionId, sessionId), eq(tasks.source, "generated")))];
+    if (rows.length) ops.push(db.insert(tasks).values(rows));
+    await db.batch(ops as any);
+  }
+  return { enriched: sessionId };
 }
 
 // Register (or re-activate) a session with NO tasks, so it appears on the dashboard the

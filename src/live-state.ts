@@ -1,10 +1,12 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
 import { createDb } from "./db/client";
-import { accounts, apiKeys } from "./db/schema";
+import { accounts, apiKeys, sessions as sessionsTable, tasks as tasksTable } from "./db/schema";
 import {
   dismissTask,
   endLatestSession,
   endSession,
+  enrichSession,
+  groupBy,
   ingestSnapshot,
   removeSession,
   startSession,
@@ -33,6 +35,7 @@ type LiveTask = {
   id: string;
   name: string;
   status: string;
+  source?: string;
   position: number;
   createdAt: string;
   updatedAt: string;
@@ -43,6 +46,7 @@ type LiveSession = {
   machineId: string;
   project: string | null;
   title: string | null;
+  summary?: string | null;
   status: string;
   endedReason: string | null;
   startedAt: string;
@@ -70,7 +74,7 @@ type Verification = {
 
 type ArchiveEvent = {
   id: string;
-  kind: "api-key" | "start" | "ingest" | "dismiss" | "end" | "remove";
+  kind: "api-key" | "start" | "ingest" | "dismiss" | "end" | "remove" | "enrich";
   email: string;
   body: any;
   queuedAt: number;
@@ -163,6 +167,25 @@ export class LiveState {
       await this.ctx.storage.setAlarm(Date.now());
       return json({ ok: true, ...result });
     }
+    if (path === "/api/session/enrich" && request.method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      const result = enrichLive(account, email, body);
+      if ("error" in result) return json({ error: result.error }, 400);
+      queue(state, {
+        id: `enrich:${email}:${String(body?.sessionId)}`,
+        kind: "enrich",
+        email,
+        body,
+      });
+      // Enrichment lands after SessionEnd already flushed — flush again promptly so
+      // the archive row gets its summary without waiting out the hourly alarm.
+      await this.persist(state);
+      await this.ctx.storage.setAlarm(Date.now());
+      return json({ ok: true, ...result });
+    }
+    if (path === "/api/history/sessions" && request.method === "GET") {
+      return this.historySessions(url, email);
+    }
     if (path === "/api/dismiss" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
       const result = dismissLive(account, body);
@@ -195,6 +218,48 @@ export class LiveState {
       return json({ ok: true });
     }
     return json({ error: "not_found" }, 404);
+  }
+
+  // Durable session history for the orchestrator: enriched (summarized) sessions from
+  // Postgres, newest first, with their generated follow-up tasks. Filters: ?project=,
+  // ?since= (ISO date), ?all=1 (include unsummarized), ?limit= (default 50, max 500).
+  private async historySessions(url: URL, email: string): Promise<Response> {
+    try {
+      const db = createDb(this.env.DATABASE_URL);
+      const project = url.searchParams.get("project");
+      const since = url.searchParams.get("since");
+      const includeAll = url.searchParams.get("all") === "1";
+      const limit = Math.min(Number(url.searchParams.get("limit") ?? 50) || 50, 500);
+
+      const conditions = [eq(sessionsTable.accountEmail, email)];
+      if (!includeAll) conditions.push(isNotNull(sessionsTable.summary));
+      if (project) conditions.push(eq(sessionsTable.project, project));
+      if (since && !Number.isNaN(Date.parse(since))) {
+        conditions.push(gte(sessionsTable.lastActivityAt, new Date(since)));
+      }
+
+      const sessionRows = await db
+        .select()
+        .from(sessionsTable)
+        .where(and(...conditions))
+        .orderBy(desc(sessionsTable.lastActivityAt))
+        .limit(limit);
+      const ids = sessionRows.map((row) => row.id);
+      const taskRows = ids.length
+        ? await db.select().from(tasksTable).where(and(eq(tasksTable.accountEmail, email), eq(tasksTable.source, "generated")))
+        : [];
+      const tasksBySession = groupBy(taskRows.filter((task) => ids.includes(task.sessionId)), (task) => task.sessionId);
+
+      return json({
+        sessions: sessionRows.map((row) => ({
+          ...row,
+          shortId: stripAccount(email, row.id),
+          generatedTasks: tasksBySession.get(row.id) ?? [],
+        })),
+      });
+    } catch (error) {
+      return json({ error: "history_failed", detail: String(error) }, 500);
+    }
   }
 
   private async requestOtp(request: Request, state: DurableState): Promise<Response> {
@@ -371,16 +436,20 @@ function ingestLive(account: DurableState["accounts"][string], email: string, bo
       id: `${sessionId}::${position}`,
       name,
       status: deferred.has(name) ? "deferred" : normalizeTaskStatus(task?.status),
+      source: "live",
       position,
       createdAt: now,
       updatedAt: now,
     };
   });
+  // Snapshots replace only the live TodoWrite mirror; generated tasks ride along.
+  tasks.push(...(previous?.tasks.filter((task) => task.source === "generated") ?? []));
   liveMachine.sessions[sessionId] = {
     id: sessionId,
     machineId,
     project: session.project ?? previous?.project ?? null,
     title: session.title ?? previous?.title ?? null,
+    summary: previous?.summary ?? null,
     status: normalizeSessionStatus(session.status),
     endedReason: null,
     startedAt: previous?.startedAt ?? now,
@@ -449,6 +518,38 @@ function endLive(account: DurableState["accounts"][string], email: string, body:
   }
   account.version = Date.now();
   return { ended: session?.id ?? null };
+}
+
+function enrichLive(account: DurableState["accounts"][string], email: string, body: any) {
+  const rawSessionId = String(body?.sessionId ?? "");
+  if (!rawSessionId) return { error: "sessionId required" } as const;
+  const session = findSession(account, `${email}::${rawSessionId}`) ?? findSession(account, rawSessionId);
+  // The session may already be gone from live state (ended cards age out) — that's
+  // fine, the archive event still enriches Postgres.
+  if (session) {
+    const now = new Date().toISOString();
+    if (body?.title) session.title = String(body.title).slice(0, 300);
+    if (body?.summary) session.summary = String(body.summary).slice(0, 8000);
+    if (Array.isArray(body?.tasks)) {
+      session.tasks = session.tasks.filter((task) => task.source !== "generated");
+      session.tasks.push(
+        ...body.tasks
+          .map((task: any, position: number) => ({
+            id: `${session.id}::gen::${position}`,
+            name: String(task?.name ?? task?.content ?? "").slice(0, 2000),
+            status: normalizeTaskStatus(task?.status),
+            source: "generated",
+            position,
+            createdAt: now,
+            updatedAt: now,
+          }))
+          .filter((task: LiveTask) => task.name),
+      );
+    }
+    session.updatedAt = now;
+    account.version = Date.now();
+  }
+  return { enriched: session?.id ?? null };
 }
 
 function dismissLive(account: DurableState["accounts"][string], body: any) {
@@ -531,6 +632,9 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
       break;
     case "remove":
       await removeSession(db, event.email, String(event.body.sessionId));
+      break;
+    case "enrich":
+      await enrichSession(db, event.email, event.body);
       break;
   }
 }
