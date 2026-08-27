@@ -9,6 +9,8 @@ import {
   titleSession,
   groupBy,
   ingestSnapshot,
+  purgeOldEndedSessions,
+  reapStaleSessions,
   removeSession,
   startSession,
 } from "./store";
@@ -121,6 +123,12 @@ export class LiveState {
     }
     if (path === "/api/auth/verify-otp" && request.method === "POST") {
       return this.verifyOtp(request, state);
+    }
+
+    // Cron-only entry point: the public worker forwards nothing but /api/*, so this
+    // path is unreachable from outside and needs no bearer key.
+    if (path === "/internal/maintenance" && request.method === "POST") {
+      return this.maintenance(state);
     }
 
     const email = await this.resolveEmail(request, state);
@@ -348,6 +356,25 @@ export class LiveState {
       return email;
     }
     return null;
+  }
+
+  // Scheduled maintenance: reap silent sessions and prune the live tree. Codex (and
+  // any killed process) never fires SessionEnd, so without this both the DO state and
+  // Postgres accumulate "active" sessions forever.
+  private async maintenance(state: DurableState): Promise<Response> {
+    const pruned = pruneLive(state);
+    let reaped = 0;
+    let purged = 0;
+    try {
+      const db = createDb(this.env.DATABASE_URL);
+      reaped = (await reapStaleSessions(db)).ended;
+      purged = (await purgeOldEndedSessions(db)).removed;
+    } catch (error) {
+      // Postgres maintenance is retried by the next cron; live pruning already ran.
+      console.error("[maintenance] postgres pass failed", error);
+    }
+    await this.flushArchive(state);
+    return json({ ok: true, ...pruned, reaped, purged });
   }
 
   private async changed(state: DurableState): Promise<void> {
@@ -613,6 +640,39 @@ function findSession(account: DurableState["accounts"][string], sessionId: strin
     if (session) return session;
   }
   return undefined;
+}
+
+// Mirrors the Postgres reaper: a session silent past REAP_AFTER_MS is marked ended,
+// and ended cards leave the live tree an hour later (Postgres keeps the durable row).
+const LIVE_REAP_AFTER_MS = 45 * 60_000;
+const LIVE_DROP_ENDED_AFTER_MS = 60 * 60_000;
+
+function pruneLive(state: DurableState) {
+  const now = Date.now();
+  let reapedLive = 0;
+  let droppedLive = 0;
+  for (const account of Object.values(state.accounts)) {
+    let changed = 0;
+    for (const [machineId, machine] of Object.entries(account.machines)) {
+      for (const [sessionId, session] of Object.entries(machine.sessions)) {
+        const lastActivity = Date.parse(session.lastActivityAt ?? session.updatedAt) || 0;
+        if (session.status !== "ended" && now - lastActivity > LIVE_REAP_AFTER_MS) {
+          session.status = "ended";
+          session.endedReason = "reaper";
+          session.updatedAt = new Date().toISOString();
+          reapedLive += 1;
+          changed += 1;
+        } else if (session.status === "ended" && now - (Date.parse(session.updatedAt) || 0) > LIVE_DROP_ENDED_AFTER_MS) {
+          delete machine.sessions[sessionId];
+          droppedLive += 1;
+          changed += 1;
+        }
+      }
+      if (Object.keys(machine.sessions).length === 0) delete account.machines[machineId];
+    }
+    if (changed) account.version = Date.now();
+  }
+  return { reapedLive, droppedLive };
 }
 
 function buildLiveTree(account: DurableState["accounts"][string], email: string) {

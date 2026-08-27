@@ -13,4 +13,12 @@ app.all("/api/*", (c) => {
 app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export { LiveState };
-export default { fetch: app.fetch };
+export default {
+  fetch: app.fetch,
+  // Cron: reap silent sessions (Codex never fires SessionEnd), prune the live tree,
+  // and flush the archive queue. /internal/* is not reachable through fetch above.
+  scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
+    const object = env.LIVE_STATE.get(env.LIVE_STATE.idFromName("fleet"));
+    ctx.waitUntil(object.fetch(new Request("https://live-state/internal/maintenance", { method: "POST" })));
+  },
+};

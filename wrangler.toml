@@ -8,6 +8,10 @@ routes = [
   { pattern = "fleet.copaciu.com", custom_domain = true }
 ]
 
+# Maintenance: reap silent sessions, prune live state, flush the archive queue.
+[triggers]
+crons = ["*/30 * * * *"]
+
 [[durable_objects.bindings]]
 name = "LIVE_STATE"
 class_name = "LiveState"
