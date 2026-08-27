@@ -266,6 +266,28 @@ export async function purgeOldEndedSessions(db: DB): Promise<{ removed: number }
   return { removed: rows.length };
 }
 
+// Early title from the first-prompt hook: fires while the session is still running,
+// so a live card gets a real name within seconds of the opening message. Never
+// outranks a digest — once enrichment has run, the transcript-derived title wins.
+export async function titleSession(
+  db: DB,
+  email: string,
+  body: any,
+): Promise<{ error?: string; titled?: string }> {
+  const rawSessionId = String(body?.sessionId ?? "");
+  const title = String(body?.title ?? "").slice(0, 300);
+  if (!rawSessionId || !title) return { error: "sessionId and title required" };
+  const sessionId = `${email}::${rawSessionId}`;
+
+  const updated = await db
+    .update(sessions)
+    .set({ title, updatedAt: new Date() })
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email), isNull(sessions.summarizedAt)))
+    .returning({ id: sessions.id });
+  if (!updated.length) return { error: "not_found" };
+  return { titled: sessionId };
+}
+
 // Post-session enrichment from the summarizer hook: AI-generated title/summary plus
 // follow-up tasks extracted from the transcript (source "generated", distinct from the
 // live TodoWrite mirror). Update-only: the session row must already exist (SessionEnd

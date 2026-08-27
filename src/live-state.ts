@@ -6,6 +6,7 @@ import {
   endLatestSession,
   endSession,
   enrichSession,
+  titleSession,
   groupBy,
   ingestSnapshot,
   removeSession,
@@ -74,7 +75,7 @@ type Verification = {
 
 type ArchiveEvent = {
   id: string;
-  kind: "api-key" | "start" | "ingest" | "dismiss" | "end" | "remove" | "enrich";
+  kind: "api-key" | "start" | "ingest" | "dismiss" | "end" | "remove" | "enrich" | "title";
   email: string;
   body: any;
   queuedAt: number;
@@ -165,6 +166,19 @@ export class LiveState {
       });
       await this.persist(state);
       await this.ctx.storage.setAlarm(Date.now());
+      return json({ ok: true, ...result });
+    }
+    if (path === "/api/session/title" && request.method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      const result = titleLive(account, email, body);
+      if ("error" in result) return json({ error: result.error }, 400);
+      queue(state, {
+        id: `title:${email}:${String(body?.sessionId)}`,
+        kind: "title",
+        email,
+        body,
+      });
+      await this.changed(state);
       return json({ ok: true, ...result });
     }
     if (path === "/api/session/enrich" && request.method === "POST") {
@@ -520,6 +534,22 @@ function endLive(account: DurableState["accounts"][string], email: string, body:
   return { ended: session?.id ?? null };
 }
 
+// Early title from the first-prompt hook. Fires seconds into a session, so the card
+// stops showing the raw session name almost immediately. A digest title (summary
+// present) always outranks it, which also covers out-of-order delivery.
+function titleLive(account: DurableState["accounts"][string], email: string, body: any) {
+  const rawSessionId = String(body?.sessionId ?? "");
+  const title = String(body?.title ?? "").slice(0, 300);
+  if (!rawSessionId || !title) return { error: "sessionId and title required" } as const;
+  const session = findSession(account, `${email}::${rawSessionId}`) ?? findSession(account, rawSessionId);
+  if (session && !session.summary) {
+    session.title = title;
+    session.updatedAt = new Date().toISOString();
+    account.version = Date.now();
+  }
+  return { titled: session?.id ?? null };
+}
+
 function enrichLive(account: DurableState["accounts"][string], email: string, body: any) {
   const rawSessionId = String(body?.sessionId ?? "");
   if (!rawSessionId) return { error: "sessionId required" } as const;
@@ -635,6 +665,9 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
       break;
     case "enrich":
       await enrichSession(db, event.email, event.body);
+      break;
+    case "title":
+      await titleSession(db, event.email, event.body);
       break;
   }
 }
