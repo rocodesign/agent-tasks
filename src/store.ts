@@ -1,6 +1,7 @@
 import { eq, ne, and, asc, desc, lt, max, isNull, inArray } from "drizzle-orm";
 import type { DB } from "./db/client";
 import { machines, sessions, tasks, dismissals } from "./db/schema";
+import { normalizeProvider, sessionRelation } from "./session-metadata";
 
 // All data access is account-scoped (multi-tenant). `email` is the authenticated
 // account; machine/session ids are namespaced as `${email}::${rawId}`.
@@ -20,6 +21,7 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
   const now = new Date();
   const machineId = `${email}::${machine.id}`;
   const sessionId = `${email}::${session.id}`;
+  const provider = normalizeProvider(session.provider);
 
   await db
     .insert(machines)
@@ -45,6 +47,7 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
       machineId,
       project: session.project ?? null,
       title: session.title ?? null,
+      provider,
       status: normalizeSessionStatus(session.status),
       lastActivityAt: now,
       updatedAt: now,
@@ -63,6 +66,7 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
         // explicitly provides new values — agents reporting tasks needn't resend them.
         ...(session.project ? { project: session.project } : {}),
         ...(session.title ? { title: session.title } : {}),
+        ...(provider ? { provider } : {}),
       },
     });
 
@@ -136,6 +140,7 @@ export async function buildTree(db: DB, email: string) {
         // A friendly, stable name + the raw (un-namespaced) id for reference.
         name: sessionName(stripAccount(email, s.id)),
         shortId: stripAccount(email, s.id),
+        ...sessionRelation(s.id),
         tasks: tasksBySession.get(s.id) ?? [],
       }))
       // Active/idle first; ended sinks to the bottom; otherwise most-recent first.
@@ -348,11 +353,13 @@ export async function startSession(
     sessionId: string;
     project?: string | null;
     title?: string | null;
+    provider?: string | null;
   },
 ): Promise<{ machineId: string; sessionId: string }> {
   const now = new Date();
   const machineId = `${email}::${p.machineId}`;
   const sessionId = `${email}::${p.sessionId}`;
+  const provider = normalizeProvider(p.provider);
 
   await db
     .insert(machines)
@@ -378,6 +385,7 @@ export async function startSession(
       machineId,
       project: p.project ?? null,
       title: p.title ?? null,
+      provider,
       status: "active",
       lastActivityAt: now,
       updatedAt: now,
@@ -393,6 +401,7 @@ export async function startSession(
         // Only overwrite project/title when the caller supplies them.
         ...(p.project ? { project: p.project } : {}),
         ...(p.title ? { title: p.title } : {}),
+        ...(provider ? { provider } : {}),
       },
     });
 

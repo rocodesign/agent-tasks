@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 
 // ---- types (mirror /api/tree) --------------------------------------------
 type Task = { id: string; name: string; status: string; position: number; updatedAt: string };
+type SessionProvider = "claude" | "codex";
 type Session = {
   id: string;
   machineId: string;
@@ -9,6 +10,10 @@ type Session = {
   shortId: string; // raw session id without the account namespace
   project: string | null;
   title: string | null;
+  provider: SessionProvider | null;
+  isSubagent: boolean;
+  parentSessionId: string | null;
+  agentId: string | null;
   status: string;
   endedReason: string | null; // tool | hook | reaper once ended; null while live
   startedAt: string;
@@ -339,9 +344,20 @@ function SessionCard({
       style={{ borderColor: color }}
     >
       <div className="flex items-start justify-between gap-2.5">
-        <div className="min-w-0">
-          <div className="truncate font-mono text-[13px]" style={{ color }} title={session.project ?? session.name}>
-            {headline}
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <ProviderIcon provider={session.provider} />
+            <div className="truncate font-mono text-[13px]" style={{ color }} title={session.project ?? session.name}>
+              {headline}
+            </div>
+            {session.isSubagent && (
+              <span
+                className="flex-none rounded border border-violet-400/20 bg-violet-400/10 px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.06em] text-violet-300"
+                title={subagentLabel(session)}
+              >
+                subagent
+              </span>
+            )}
           </div>
           {subline && <div className="mt-[3px] truncate font-mono text-[11px] text-fg-6">{subline}</div>}
         </div>
@@ -429,6 +445,44 @@ function TaskIcon({ status }: { status: string }) {
   if (status === "deferred") return <span className={`${base} text-amber-400/70`}>⊘</span>;
   if (status === "in_progress") return <span className={`${base} text-violet-400 animate-pulse-soft`}>◉</span>;
   return <span className={`${base} text-fg-6`}>◷</span>;
+}
+
+function ProviderIcon({ provider }: { provider: SessionProvider | null }) {
+  if (!provider) return null;
+  const label = provider === "codex" ? "Codex" : "Claude";
+  const color =
+    provider === "codex"
+      ? "border-cyan-300/20 bg-cyan-300/10 text-cyan-300"
+      : "border-orange-300/20 bg-orange-300/10 text-orange-300";
+  return (
+    <span
+      className={`flex h-[18px] w-[18px] flex-none items-center justify-center rounded border ${color}`}
+      title={label}
+      aria-label={label}
+      role="img"
+    >
+      {provider === "codex" ? (
+        <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" aria-hidden="true">
+          <path
+            d="m4.5 5.25 2.75 2.75-2.75 2.75M8.75 10.75h2.75"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" className="h-3 w-3" fill="none" aria-hidden="true">
+          <path
+            d="M8 2.25v11.5M2.25 8h11.5M3.9 3.9l8.2 8.2m0-8.2-8.2 8.2"
+            stroke="currentColor"
+            strokeWidth="1.25"
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
+    </span>
+  );
 }
 
 function SessionPill({ status, endedReason }: { status: EffStatus; endedReason?: string | null }) {
@@ -683,6 +737,13 @@ function basename(p: string | null): string | null {
   const trimmed = p.replace(/[\\/]+$/, "");
   const parts = trimmed.split(/[\\/]/);
   return parts[parts.length - 1] || trimmed;
+}
+
+function subagentLabel(session: Session): string {
+  if (!session.parentSessionId) return "Subagent";
+  const separator = session.parentSessionId.indexOf("::");
+  const parent = separator >= 0 ? session.parentSessionId.slice(separator + 2) : session.parentSessionId;
+  return `Subagent of ${parent}`;
 }
 
 // Deterministic, dark-theme-friendly color per machine (stable from its id). High enough

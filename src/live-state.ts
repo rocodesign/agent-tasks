@@ -14,6 +14,7 @@ import {
   removeSession,
   startSession,
 } from "./store";
+import { normalizeProvider, sessionRelation, type SessionProvider } from "./session-metadata";
 import {
   generateApiKey,
   generateOtp,
@@ -49,6 +50,7 @@ type LiveSession = {
   machineId: string;
   project: string | null;
   title: string | null;
+  provider: SessionProvider | null;
   summary?: string | null;
   status: string;
   endedReason: string | null;
@@ -470,6 +472,7 @@ function ingestLive(account: DurableState["accounts"][string], email: string, bo
     updatedAt: now,
   });
   const previous = liveMachine.sessions[sessionId];
+  const provider = normalizeProvider(session.provider ?? body?.provider) ?? previous?.provider ?? null;
   const deferred = new Set(previous?.tasks.filter((task) => task.status === "deferred").map((task) => task.name) ?? []);
   const tasks: LiveTask[] = (Array.isArray(body?.tasks) ? body.tasks : []).map((task: any, position: number) => {
     const name = String(task?.name ?? task?.content ?? "").slice(0, 2000);
@@ -490,6 +493,7 @@ function ingestLive(account: DurableState["accounts"][string], email: string, bo
     machineId,
     project: session.project ?? previous?.project ?? null,
     title: session.title ?? previous?.title ?? null,
+    provider,
     summary: previous?.summary ?? null,
     status: normalizeSessionStatus(session.status),
     endedReason: null,
@@ -523,11 +527,13 @@ function startLive(account: DurableState["accounts"][string], email: string, bod
   machine.lastSeen = now;
   machine.updatedAt = now;
   const previous = machine.sessions[sessionId];
+  const provider = normalizeProvider(body?.provider ?? body?.session?.provider) ?? previous?.provider ?? null;
   machine.sessions[sessionId] = {
     id: sessionId,
     machineId,
     project: body?.project ?? body?.session?.project ?? previous?.project ?? null,
     title: body?.title ?? body?.session?.title ?? previous?.title ?? null,
+    provider,
     status: "active",
     endedReason: null,
     startedAt: previous?.startedAt ?? now,
@@ -684,8 +690,10 @@ function buildLiveTree(account: DurableState["accounts"][string], email: string)
       sessions: Object.values(machine.sessions)
         .map((session) => ({
           ...session,
+          provider: session.provider ?? null,
           name: sessionName(stripAccount(email, session.id)),
           shortId: stripAccount(email, session.id),
+          ...sessionRelation(session.id),
         }))
         .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
     }));
@@ -705,6 +713,7 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
         sessionId: String(event.body?.sessionId ?? event.body?.session?.id ?? ""),
         project: event.body?.project ?? event.body?.session?.project ?? null,
         title: event.body?.title ?? event.body?.session?.title ?? null,
+        provider: event.body?.provider ?? event.body?.session?.provider ?? null,
       });
       break;
     case "ingest":

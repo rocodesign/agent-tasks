@@ -64,6 +64,7 @@ export const sessions = pgTable(
       .references(() => machines.id, { onDelete: "cascade" }),
     project: text("project"),
     title: text("title"),
+    provider: text("provider"),
     summary: text("summary"), // AI-generated post-session digest; null until enriched
     summarizedAt: timestamp("summarized_at", { withTimezone: true }),
     status: text("status").notNull().default("active"), // active | idle | ended
