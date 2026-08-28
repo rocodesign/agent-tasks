@@ -35,8 +35,10 @@ type Machine = {
 };
 
 type SessionView = { session: Session; machine: Machine; eff: EffStatus };
+type StackPlacement = { side: "below" | "left" | "right"; columns: 1 | 2 };
 type SubagentStackControl = {
-  count: number;
+  activeCount: number;
+  totalCount: number;
   expanded: boolean;
   panelId: string;
   onPress: () => void;
@@ -332,7 +334,10 @@ function SessionStack({
   onRemove: (sessionId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [placement, setPlacement] = useState<StackPlacement>({ side: "right", columns: 1 });
   const panelId = useId();
+  const stackRef = useRef<HTMLElement>(null);
+  const activeSubagents = subagents.filter(({ eff }) => eff === "active" || eff === "idle");
 
   if (subagents.length === 0) {
     return (
@@ -348,27 +353,80 @@ function SessionStack({
   }
 
   const supportsHover = () => window.matchMedia("(hover: hover)").matches;
+  const positionOverlay = () => {
+    if (!supportsHover()) {
+      setPlacement({ side: "right", columns: 1 });
+      return;
+    }
+
+    const card = stackRef.current?.getBoundingClientRect();
+    const viewport = stackRef.current?.closest("main")?.getBoundingClientRect();
+    if (!card || !viewport) return;
+
+    const gap = 14;
+    const preferredColumns = activeSubagents.length > 1 ? 2 : 1;
+    const leftSpace = card.left - viewport.left;
+    const rightSpace = viewport.right - card.right;
+    const preferredWidth = card.width * preferredColumns + gap * preferredColumns;
+    const columns = preferredColumns === 2 && Math.max(leftSpace, rightSpace) < preferredWidth ? 1 : preferredColumns;
+    const overlayWidth = card.width * columns + gap * columns;
+    if (Math.max(leftSpace, rightSpace) < card.width + gap) {
+      setPlacement({ side: "below", columns: 1 });
+      return;
+    }
+    const side = rightSpace >= overlayWidth || rightSpace >= leftSpace ? "right" : "left";
+    setPlacement({ side, columns });
+  };
+  const openOverlay = () => {
+    if (activeSubagents.length === 0) return;
+    positionOverlay();
+    setExpanded(true);
+  };
+  const isExpanded = expanded && activeSubagents.length > 0;
   const stackControl: SubagentStackControl = {
-    count: subagents.length,
-    expanded,
+    activeCount: activeSubagents.length,
+    totalCount: subagents.length,
+    expanded: isExpanded,
     panelId,
     onPress: () => {
-      if (!supportsHover()) setExpanded((current) => !current);
+      if (!supportsHover() && activeSubagents.length > 0) {
+        if (!isExpanded) positionOverlay();
+        setExpanded((current) => !current);
+      }
     },
   };
   const color = machineColor(root.machine.id);
+  const placementClass =
+    placement.side === "right"
+      ? "md:left-full md:right-auto md:top-0 md:pl-3.5 md:pr-0 md:pt-0"
+      : placement.side === "left"
+        ? "md:left-auto md:right-full md:top-0 md:pl-0 md:pr-3.5 md:pt-0"
+        : "md:left-0 md:right-auto md:top-full md:pl-0 md:pr-0 md:pt-3";
+  const widthClass =
+    placement.side === "below"
+      ? "md:w-full"
+      : placement.columns === 2
+        ? "md:w-[calc(200%+1.75rem)]"
+        : "md:w-[calc(100%+0.875rem)]";
+  const hiddenOffset =
+    placement.side === "right"
+      ? "md:-translate-x-3"
+      : placement.side === "left"
+        ? "md:translate-x-3"
+        : "md:-translate-y-2";
 
   return (
     <section
-      className="relative isolate"
+      ref={stackRef}
+      className={`relative ${isExpanded ? "z-40" : "z-0"}`}
       onMouseEnter={() => {
-        if (supportsHover()) setExpanded(true);
+        if (supportsHover()) openOverlay();
       }}
       onMouseLeave={() => {
         if (supportsHover()) setExpanded(false);
       }}
       onFocus={() => {
-        if (supportsHover()) setExpanded(true);
+        if (supportsHover()) openOverlay();
       }}
       onBlur={(event) => {
         if (supportsHover() && !event.currentTarget.contains(event.relatedTarget as Node | null)) setExpanded(false);
@@ -377,14 +435,14 @@ function SessionStack({
       <div
         aria-hidden="true"
         className={`pointer-events-none absolute inset-x-2 top-1 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
-          expanded ? "translate-y-0 opacity-0" : "translate-y-2 opacity-20"
+          isExpanded ? "translate-y-0 opacity-0" : "translate-y-2 opacity-20"
         }`}
         style={{ borderColor: color }}
       />
       <div
         aria-hidden="true"
         className={`pointer-events-none absolute inset-x-4 top-1 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
-          expanded ? "translate-y-0 opacity-0" : "translate-y-3.5 opacity-10"
+          isExpanded ? "translate-y-0 opacity-0" : "translate-y-3.5 opacity-10"
         }`}
         style={{ borderColor: color }}
       />
@@ -399,31 +457,33 @@ function SessionStack({
           subagentStack={stackControl}
         />
       </div>
-      <div
-        id={panelId}
-        aria-hidden={!expanded}
-        className={`grid transition-all duration-200 ease-out motion-reduce:transition-none ${
-          expanded
-            ? "visible mt-3 grid-rows-[1fr] opacity-100"
-            : "invisible pointer-events-none mt-0 grid-rows-[0fr] opacity-0"
-        }`}
-      >
-        <div className="min-h-0 overflow-hidden">
-          <div className="flex flex-col gap-3 pl-3">
-            {subagents.map(({ session, machine, eff }) => (
-              <SessionCard
-                key={session.id}
-                session={session}
-                machine={machine}
-                eff={eff}
-                showMachine={showMachine}
-                onDismiss={onDismiss}
-                onRemove={onRemove}
-              />
-            ))}
+      {activeSubagents.length > 0 && (
+        <div
+          id={panelId}
+          aria-hidden={!isExpanded}
+          className={`absolute left-0 top-full z-30 w-full pt-3 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${placementClass} ${widthClass} ${
+            isExpanded
+              ? "visible translate-x-0 translate-y-0 opacity-100"
+              : `invisible pointer-events-none -translate-y-2 opacity-0 md:translate-y-0 ${hiddenOffset}`
+          }`}
+        >
+          <div className="max-h-[min(75vh,48rem)] overflow-y-auto rounded-2xl border border-edge-2 bg-surface/95 p-3 shadow-2xl backdrop-blur-md">
+            <div className={`grid grid-cols-1 gap-3 ${placement.columns === 2 ? "md:grid-cols-2" : ""}`}>
+              {activeSubagents.map(({ session, machine, eff }) => (
+                <SessionCard
+                  key={session.id}
+                  session={session}
+                  machine={machine}
+                  eff={eff}
+                  showMachine={showMachine}
+                  onDismiss={onDismiss}
+                  onRemove={onRemove}
+                />
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }
@@ -479,20 +539,18 @@ function SessionCard({
                 subagent
               </span>
             )}
-            {subagentStack && (
+            {subagentStack && subagentStack.activeCount > 0 && (
               <button
                 type="button"
                 aria-expanded={subagentStack.expanded}
                 aria-controls={subagentStack.panelId}
                 onClick={subagentStack.onPress}
-                title={`${subagentStack.expanded ? "Hide" : "Show"} ${subagentStack.count} ${
-                  subagentStack.count === 1 ? "subagent" : "subagents"
-                }`}
+                title={`${subagentStack.expanded ? "Hide" : "Show"} ${subagentStack.activeCount} active of ${
+                  subagentStack.totalCount
+                } subagents`}
                 className="flex flex-none items-center gap-1 rounded border border-violet-400/20 bg-violet-400/10 px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.05em] text-violet-300 transition-colors hover:border-violet-300/40 hover:bg-violet-400/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300"
               >
-                <span>
-                  {subagentStack.count} {subagentStack.count === 1 ? "subagent" : "subagents"}
-                </span>
+                <span>{subagentStack.activeCount}/{subagentStack.totalCount} active</span>
                 <svg
                   aria-hidden="true"
                   viewBox="0 0 12 12"
@@ -503,6 +561,14 @@ function SessionCard({
                   <path d="m3 4.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" />
                 </svg>
               </button>
+            )}
+            {subagentStack && subagentStack.activeCount === 0 && (
+              <span
+                title={`0 active of ${subagentStack.totalCount} subagents`}
+                className="flex flex-none items-center rounded border border-violet-400/15 bg-violet-400/[0.06] px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.05em] text-violet-300/60"
+              >
+                0/{subagentStack.totalCount} active
+              </span>
             )}
           </div>
           {subline && <div className="mt-[3px] truncate font-mono text-[11px] text-fg-6">{subline}</div>}
