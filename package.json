@@ -15,7 +15,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "npm run typecheck && node --test test/session-metadata.test.ts test/session-groups.test.ts"
+    "test": "npm run typecheck && node --test test/session-metadata.test.ts test/session-groups.test.ts test/session-stack-layout.test.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",

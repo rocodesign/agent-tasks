@@ -418,7 +418,7 @@ function SessionStack({
   return (
     <section
       ref={stackRef}
-      className={`relative ${isExpanded ? "z-40" : "z-0"}`}
+      className={`relative self-start ${isExpanded ? "z-40" : "z-0"}`}
       onMouseEnter={() => {
         if (supportsHover()) openOverlay();
       }}
@@ -434,15 +434,15 @@ function SessionStack({
     >
       <div
         aria-hidden="true"
-        className={`pointer-events-none absolute inset-x-2 top-1 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
-          isExpanded ? "translate-y-0 opacity-0" : "translate-y-2 opacity-20"
+        className={`pointer-events-none absolute inset-x-2 top-0 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
+          isExpanded ? "translate-y-0 opacity-0" : "translate-y-1 opacity-20"
         }`}
         style={{ borderColor: color }}
       />
       <div
         aria-hidden="true"
-        className={`pointer-events-none absolute inset-x-4 top-1 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
-          isExpanded ? "translate-y-0 opacity-0" : "translate-y-3.5 opacity-10"
+        className={`pointer-events-none absolute inset-x-4 top-0 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
+          isExpanded ? "translate-y-0 opacity-0" : "translate-y-2 opacity-10"
         }`}
         style={{ borderColor: color }}
       />
@@ -467,7 +467,7 @@ function SessionStack({
               : `invisible pointer-events-none -translate-y-2 opacity-0 md:translate-y-0 ${hiddenOffset}`
           }`}
         >
-          <div className="max-h-[min(75vh,48rem)] overflow-y-auto rounded-2xl border border-edge-2 bg-surface/95 p-3 shadow-2xl backdrop-blur-md">
+          <div className="max-h-[min(75vh,48rem)] overflow-y-auto rounded-2xl border border-edge-2 bg-surface p-3 shadow-2xl">
             <div className={`grid grid-cols-1 gap-3 ${placement.columns === 2 ? "md:grid-cols-2" : ""}`}>
               {activeSubagents.map(({ session, machine, eff }) => (
                 <SessionCard
