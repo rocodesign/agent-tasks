@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react";
+import { groupSessions } from "./session-groups";
 
 // ---- types (mirror /api/tree) --------------------------------------------
 type Task = { id: string; name: string; status: string; position: number; updatedAt: string };
@@ -31,6 +32,14 @@ type Machine = {
   label: string | null;
   lastSeen: string;
   sessions: Session[];
+};
+
+type SessionView = { session: Session; machine: Machine; eff: EffStatus };
+type SubagentStackControl = {
+  count: number;
+  expanded: boolean;
+  panelId: string;
+  onPress: () => void;
 };
 
 const KEY_STORAGE = "agent-tasks:apiKey";
@@ -127,6 +136,7 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: () => voi
         ),
     [flatSessions, statusFilter],
   );
+  const sessionGroups = useMemo(() => groupSessions(sessions), [sessions]);
   const counts = useMemo(() => {
     const c = { all: flatSessions.length, active: 0, stale: 0, ended: 0 };
     for (const { eff } of flatSessions) {
@@ -290,12 +300,11 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: () => voi
             <EmptyState />
           ) : (
             <div className="grid grid-cols-[repeat(auto-fill,minmax(320px,1fr))] content-start gap-3.5">
-              {sessions.map(({ session, machine, eff }) => (
-                <SessionCard
-                  key={session.id}
-                  session={session}
-                  machine={machine}
-                  eff={eff}
+              {sessionGroups.map(({ root, subagents }) => (
+                <SessionStack
+                  key={root.session.id}
+                  root={root}
+                  subagents={subagents}
                   showMachine={selected === null}
                   onDismiss={dismiss}
                   onRemove={remove}
@@ -309,6 +318,116 @@ function Dashboard({ apiKey, onSignOut }: { apiKey: string; onSignOut: () => voi
   );
 }
 
+function SessionStack({
+  root,
+  subagents,
+  showMachine,
+  onDismiss,
+  onRemove,
+}: {
+  root: SessionView;
+  subagents: SessionView[];
+  showMachine: boolean;
+  onDismiss: (sessionId: string, taskName: string) => void;
+  onRemove: (sessionId: string) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const panelId = useId();
+
+  if (subagents.length === 0) {
+    return (
+      <SessionCard
+        session={root.session}
+        machine={root.machine}
+        eff={root.eff}
+        showMachine={showMachine}
+        onDismiss={onDismiss}
+        onRemove={onRemove}
+      />
+    );
+  }
+
+  const supportsHover = () => window.matchMedia("(hover: hover)").matches;
+  const stackControl: SubagentStackControl = {
+    count: subagents.length,
+    expanded,
+    panelId,
+    onPress: () => {
+      if (!supportsHover()) setExpanded((current) => !current);
+    },
+  };
+  const color = machineColor(root.machine.id);
+
+  return (
+    <section
+      className="relative isolate"
+      onMouseEnter={() => {
+        if (supportsHover()) setExpanded(true);
+      }}
+      onMouseLeave={() => {
+        if (supportsHover()) setExpanded(false);
+      }}
+      onFocus={() => {
+        if (supportsHover()) setExpanded(true);
+      }}
+      onBlur={(event) => {
+        if (supportsHover() && !event.currentTarget.contains(event.relatedTarget as Node | null)) setExpanded(false);
+      }}
+    >
+      <div
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-x-2 top-1 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
+          expanded ? "translate-y-0 opacity-0" : "translate-y-2 opacity-20"
+        }`}
+        style={{ borderColor: color }}
+      />
+      <div
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-x-4 top-1 h-full rounded-xl border bg-surface-card transition-all duration-200 motion-reduce:transition-none ${
+          expanded ? "translate-y-0 opacity-0" : "translate-y-3.5 opacity-10"
+        }`}
+        style={{ borderColor: color }}
+      />
+      <div className="relative z-10">
+        <SessionCard
+          session={root.session}
+          machine={root.machine}
+          eff={root.eff}
+          showMachine={showMachine}
+          onDismiss={onDismiss}
+          onRemove={onRemove}
+          subagentStack={stackControl}
+        />
+      </div>
+      <div
+        id={panelId}
+        aria-hidden={!expanded}
+        className={`grid transition-all duration-200 ease-out motion-reduce:transition-none ${
+          expanded
+            ? "visible mt-3 grid-rows-[1fr] opacity-100"
+            : "invisible pointer-events-none mt-0 grid-rows-[0fr] opacity-0"
+        }`}
+      >
+        <div className="min-h-0 overflow-hidden">
+          <div className="flex flex-col gap-3 pl-3">
+            {subagents.map(({ session, machine, eff }) => (
+              <SessionCard
+                key={session.id}
+                session={session}
+                machine={machine}
+                eff={eff}
+                showMachine={showMachine}
+                onDismiss={onDismiss}
+                onRemove={onRemove}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // ---- session card ---------------------------------------------------------
 function SessionCard({
   session,
@@ -317,6 +436,7 @@ function SessionCard({
   eff,
   onDismiss,
   onRemove,
+  subagentStack,
 }: {
   session: Session;
   machine: Machine;
@@ -324,6 +444,7 @@ function SessionCard({
   eff: EffStatus;
   onDismiss: (sessionId: string, taskName: string) => void;
   onRemove: (sessionId: string) => void;
+  subagentStack?: SubagentStackControl;
 }) {
   const done = session.tasks.filter((t) => t.status === "completed").length;
   const proj = basename(session.project);
@@ -357,6 +478,31 @@ function SessionCard({
               >
                 subagent
               </span>
+            )}
+            {subagentStack && (
+              <button
+                type="button"
+                aria-expanded={subagentStack.expanded}
+                aria-controls={subagentStack.panelId}
+                onClick={subagentStack.onPress}
+                title={`${subagentStack.expanded ? "Hide" : "Show"} ${subagentStack.count} ${
+                  subagentStack.count === 1 ? "subagent" : "subagents"
+                }`}
+                className="flex flex-none items-center gap-1 rounded border border-violet-400/20 bg-violet-400/10 px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.05em] text-violet-300 transition-colors hover:border-violet-300/40 hover:bg-violet-400/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-300"
+              >
+                <span>
+                  {subagentStack.count} {subagentStack.count === 1 ? "subagent" : "subagents"}
+                </span>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 12 12"
+                  className={`h-2.5 w-2.5 transition-transform duration-200 motion-reduce:transition-none ${
+                    subagentStack.expanded ? "rotate-180" : ""
+                  }`}
+                >
+                  <path d="m3 4.5 3 3 3-3" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                </svg>
+              </button>
             )}
           </div>
           {subline && <div className="mt-[3px] truncate font-mono text-[11px] text-fg-6">{subline}</div>}
