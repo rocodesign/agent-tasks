@@ -406,7 +406,7 @@ function SessionStack({
     placement.side === "below"
       ? "md:w-full"
       : placement.columns === 2
-        ? "md:w-[calc(200%+1.75rem)]"
+        ? "md:w-[calc(200%+1.25rem)]"
         : "md:w-[calc(100%+0.875rem)]";
   const hiddenOffset =
     placement.side === "right"
@@ -467,17 +467,18 @@ function SessionStack({
               : `invisible pointer-events-none -translate-y-2 opacity-0 md:translate-y-0 ${hiddenOffset}`
           }`}
         >
-          <div className="max-h-[min(75vh,48rem)] overflow-y-auto rounded-2xl border border-edge-2 bg-surface p-3 shadow-2xl">
-            <div className={`grid grid-cols-1 gap-3 ${placement.columns === 2 ? "md:grid-cols-2" : ""}`}>
+          <div className="max-h-[min(75vh,48rem)] overflow-y-auto">
+            <div className={`grid grid-cols-1 gap-1.5 ${placement.columns === 2 ? "md:grid-cols-2" : ""}`}>
               {activeSubagents.map(({ session, machine, eff }) => (
                 <SessionCard
                   key={session.id}
                   session={session}
                   machine={machine}
                   eff={eff}
-                  showMachine={showMachine}
+                  showMachine={false}
                   onDismiss={onDismiss}
                   onRemove={onRemove}
+                  compact
                 />
               ))}
             </div>
@@ -497,6 +498,7 @@ function SessionCard({
   onDismiss,
   onRemove,
   subagentStack,
+  compact = false,
 }: {
   session: Session;
   machine: Machine;
@@ -505,33 +507,36 @@ function SessionCard({
   onDismiss: (sessionId: string, taskName: string) => void;
   onRemove: (sessionId: string) => void;
   subagentStack?: SubagentStackControl;
+  compact?: boolean;
 }) {
   const done = session.tasks.filter((t) => t.status === "completed").length;
   const proj = basename(session.project);
-  // Uniform layout for every card so the fleet doesn't look inconsistent regardless of
-  // which reporting path created the session: line 1 is always a human label (the agent-set
-  // title, or the friendly session name when none was set — never the raw project path),
-  // and line 2 is always the project dir (when known) + machine.
   const headline = session.title || session.name;
   const subParts: string[] = [];
-  if (proj) subParts.push(proj);
-  if (showMachine) subParts.push(machine.hostname);
+  if (!compact && proj) subParts.push(proj);
+  if (!compact && showMachine) subParts.push(machine.hostname);
   const subline = subParts.join("  ·  ");
   const removable = eff === "ended" || eff === "stale";
   const color = machineColor(machine.id);
   return (
     <div
-      className="group flex flex-col gap-[13px] rounded-xl border bg-surface-card px-4 py-[15px]"
+      className={`group flex flex-col rounded-xl border bg-surface-card ${
+        compact ? "gap-2 px-3 py-2.5 shadow-2xl" : "gap-[13px] px-4 py-[15px]"
+      }`}
       style={{ borderColor: color }}
     >
-      <div className="flex items-start justify-between gap-2.5">
+      <div className={`flex items-start justify-between ${compact ? "gap-2" : "gap-2.5"}`}>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <ProviderIcon provider={session.provider} />
-            <div className="truncate font-mono text-[13px]" style={{ color }} title={session.project ?? session.name}>
+            <div
+              className={`truncate font-mono ${compact ? "text-[12px]" : "text-[13px]"}`}
+              style={{ color }}
+              title={compact ? headline : session.project ?? session.name}
+            >
               {headline}
             </div>
-            {session.isSubagent && (
+            {!compact && session.isSubagent && (
               <span
                 className="flex-none rounded border border-violet-400/20 bg-violet-400/10 px-1.5 py-px text-[9px] font-semibold uppercase tracking-[0.06em] text-violet-300"
                 title={subagentLabel(session)}
@@ -574,10 +579,10 @@ function SessionCard({
           {subline && <div className="mt-[3px] truncate font-mono text-[11px] text-fg-6">{subline}</div>}
         </div>
         <div className="flex flex-none items-center gap-[9px]">
-          <span className="text-[11.5px] tabular-nums text-fg-6">
+          <span className={`${compact ? "text-[10.5px]" : "text-[11.5px]"} tabular-nums text-fg-6`}>
             {done}/{session.tasks.length}
           </span>
-          <SessionPill status={eff} endedReason={session.endedReason} />
+          {!compact && <SessionPill status={eff} endedReason={session.endedReason} />}
           {removable && (
             <button
               onClick={() => onRemove(session.id)}
@@ -590,15 +595,23 @@ function SessionCard({
         </div>
       </div>
 
-      <div className="flex flex-col gap-0.5">
+      <div className={`flex flex-col ${compact ? "gap-0" : "gap-0.5"}`}>
         {session.tasks.map((t) => (
-          <TaskRow key={t.id} task={t} sessionId={session.id} onDismiss={onDismiss} />
+          <TaskRow key={t.id} task={t} sessionId={session.id} onDismiss={onDismiss} compact={compact} />
         ))}
-        {session.tasks.length === 0 && <div className="px-2 py-1 text-[11px] text-fg-6">No tasks reported.</div>}
+        {session.tasks.length === 0 && (
+          <div className={`${compact ? "px-1.5 py-0.5 text-[10.5px]" : "px-2 py-1 text-[11px]"} text-fg-6`}>
+            No tasks reported.
+          </div>
+        )}
       </div>
 
-      <div className="flex items-center justify-between text-[11px] tabular-nums text-fg-8">
-        <span>created {detailedTimeAgo(new Date(session.startedAt).getTime())}</span>
+      <div
+        className={`flex items-center tabular-nums text-fg-8 ${
+          compact ? "justify-end text-[10px]" : "justify-between text-[11px]"
+        }`}
+      >
+        {!compact && <span>created {detailedTimeAgo(new Date(session.startedAt).getTime())}</span>}
         <span>updated {timeAgo(new Date(session.lastActivityAt).getTime())}</span>
       </div>
     </div>
@@ -609,10 +622,12 @@ function TaskRow({
   task,
   sessionId,
   onDismiss,
+  compact = false,
 }: {
   task: Task;
   sessionId: string;
   onDismiss: (sessionId: string, taskName: string) => void;
+  compact?: boolean;
 }) {
   const inProgress = task.status === "in_progress";
   const deferred = task.status === "deferred";
@@ -625,12 +640,16 @@ function TaskRow({
         : "text-fg-4";
   return (
     <div
-      className={`group flex items-center gap-[9px] rounded-md border-l-2 px-[9px] py-[5px] ${
+      className={`group flex items-center rounded-md border-l-2 ${
+        compact ? "gap-2 px-1.5 py-1" : "gap-[9px] px-[9px] py-[5px]"
+      } ${
         inProgress ? "border-violet-400 bg-violet-400/[0.08]" : "border-transparent"
       }`}
     >
       <TaskIcon status={task.status} />
-      <span className={`flex-1 truncate font-mono text-[12.5px] ${nameClass}`}>{task.name}</span>
+      <span className={`flex-1 truncate font-mono ${compact ? "text-[11.5px]" : "text-[12.5px]"} ${nameClass}`}>
+        {task.name}
+      </span>
       {deferred && (
         <span className="flex-none rounded bg-amber-400/10 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-[0.06em] text-amber-400">
           deferred
