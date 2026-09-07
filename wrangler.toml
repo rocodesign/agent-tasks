@@ -24,6 +24,7 @@ new_sqlite_classes = ["LiveState"]
 [vars]
 RESEND_FROM = "Fleet <fleet@copaciu.com>"
 ALLOWED_EMAILS = "romeo@copaciu.com"
+SHELL_URL = "https://sidus.copaciu.com"
 
 # Static UI (Vite build output). Served for any path that is not /api/*.
 [assets]

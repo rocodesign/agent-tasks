@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
-import type { DB } from "./db/client";
-import { apiKeys } from "./db/schema";
+import type { DB } from "./db/client.ts";
+import { apiKeys } from "./db/schema.ts";
 
 export type AuthEnv = {
   RESEND_API_KEY?: string;

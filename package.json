@@ -15,12 +15,13 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "npm run typecheck && node --test test/session-metadata.test.ts test/session-groups.test.ts test/session-stack-layout.test.ts"
+    "test": "npm run typecheck && node --test test/session-metadata.test.ts test/session-groups.test.ts test/session-stack-layout.test.ts test/shell-jwt.test.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
     "drizzle-orm": "^0.38.3",
-    "hono": "^4.12.9"
+    "hono": "^4.12.9",
+    "jose": "^6.2.12"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260329.1",

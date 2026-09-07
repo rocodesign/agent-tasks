@@ -24,6 +24,7 @@ import {
   sendOtpEmail,
   sha256Hex,
 } from "./auth";
+import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt";
 
 export type Bindings = {
   DATABASE_URL: string;
@@ -31,6 +32,7 @@ export type Bindings = {
   RESEND_FROM?: string;
   ALLOWED_EMAILS?: string;
   BOOTSTRAP_API_KEY?: string;
+  SHELL_URL?: string;
   LIVE_STATE: DurableObjectNamespace;
   ASSETS: Fetcher;
 };
@@ -345,6 +347,17 @@ export class LiveState {
   private async resolveEmail(request: Request, state: DurableState): Promise<string | null> {
     const token = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     if (!token) return null;
+
+    if (looksLikeJwt(token)) {
+      const email = await resolveShellAccountEmail(this.env, token);
+      if (!email) return null;
+      if (!state.accounts[email]) {
+        ensureAccount(state, email);
+        await this.persist(state);
+      }
+      return email;
+    }
+
     const hash = await sha256Hex(token);
     const known = state.keys[hash];
     if (known) return known;
