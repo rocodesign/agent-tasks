@@ -7,7 +7,7 @@ polling dashboard shows the hierarchy **Machine (source) → Session → Tasks**
 - **Live storage:** one SQLite-backed Durable Object; polling and task traffic do not wake Postgres
 - **Archive:** standard Postgres via Drizzle (Neon), flushed hourly and immediately after `SessionEnd`
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
-- **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`). Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
+- **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`), or a JWT from the Sidus shell. Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
 - **Agent integration:** the separate `rococode` plugin reports Claude Code and
   Codex lifecycle/task events to this API through silent deterministic hooks.
 
@@ -19,6 +19,7 @@ src/
   live-state.ts     deep live-state module: auth, tasks, reads, and archive queue
   store.ts          Postgres archive adapter
   auth.ts           email OTP, Resend send, API-key mint/hash, allowlist
+  shell-jwt.ts      shell JWT verification against the shell JWKS
   db/
     schema.ts       accounts / api_keys / verification / machines / sessions / tasks / dismissals
     client.ts       the ONLY driver touch point (swap to migrate vendors)
@@ -47,6 +48,30 @@ drizzle.config.ts   migrations (reads DATABASE_URL from .env)
 the app mints an API key tied to your email and stores it in the browser. Click
 **agent key** in the top bar to copy it into `AGENT_TASKS_KEY`. Hooks and
 the UI both authenticate with that key; all data is scoped to the account.
+
+## Shell JWT
+
+Every endpoint that takes an API key also takes a JSON Web Token (JWT) minted by
+the Sidus shell. The shell holds the browser session and forwards each request
+with a short-lived token, so the browser never holds a Fleet API key. Agent hooks
+keep using API keys.
+
+- Header: `Authorization: Bearer <jwt>`.
+- Signature: asymmetric (EdDSA or ES256), verified against the shell JWKS.
+- JWKS URL: `${SHELL_URL}/api/auth/jwks`. Issuer: `SHELL_URL`.
+- Required claims: `sub` (shell user id), `email`, `iss`, `exp`, `iat`. An
+  audience claim is accepted but not required.
+
+Fleet reads the `email` claim, checks it against `ALLOWED_EMAILS`, and creates the
+account on first use. The request then runs with the same account scoping an API
+key for that email would give.
+
+A bearer token is treated as a JWT when it has three dot-separated base64url
+segments. Anything else takes the API-key path unchanged.
+
+| Variable | Where | Purpose |
+|----------|-------|---------|
+| `SHELL_URL` | `[vars]` in `wrangler.toml` | Shell origin: the JWKS host and the expected issuer. Production: `https://sidus.copaciu.com`. Unset disables JWT auth. |
 
 ## Agent hook contract
 
@@ -90,8 +115,10 @@ npm run ui:dev          # vite          -> http://localhost:5173  (UI, proxies /
 
 Local env lives in `.env` (drizzle migrations: `DATABASE_URL`) and `.dev.vars`
 (worker runtime: `DATABASE_URL`, `RESEND_API_KEY`, `RESEND_FROM`,
-`ALLOWED_EMAILS`, `BOOTSTRAP_API_KEY`). Both are gitignored. `BOOTSTRAP_API_KEY`
-imports an existing agent key into a fresh Durable Object without querying Neon.
+`ALLOWED_EMAILS`, `BOOTSTRAP_API_KEY`, `SHELL_URL`). Both are gitignored.
+`BOOTSTRAP_API_KEY` imports an existing agent key into a fresh Durable Object
+without querying Neon. Set `SHELL_URL` in `.dev.vars` to point at a shell running
+locally; the `wrangler.toml` value points at production.
 
 ## Deploy
 
@@ -100,7 +127,7 @@ imports an existing agent key into a fresh Durable Object without querying Neon.
 npx wrangler secret put DATABASE_URL
 npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put BOOTSTRAP_API_KEY
-# RESEND_FROM and ALLOWED_EMAILS are non-secret [vars] in wrangler.toml
+# RESEND_FROM, ALLOWED_EMAILS and SHELL_URL are non-secret [vars] in wrangler.toml
 
 # build UI + deploy worker
 npm run deploy
