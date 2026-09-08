@@ -134,3 +134,46 @@ test("removing a session cascades to its tasks and dismissals", async (t) => {
   assert.deepEqual(await db.select().from(tasks), []);
   assert.deepEqual(await db.select().from(dismissals), []);
 });
+
+test("stores the enrichment fields from start, ingest and enrich", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, {
+    machineId: "box",
+    hostname: "box",
+    sessionId: "s1",
+    project: "D:/Work/sidus/fleet",
+    meta: { projectKey: "github.com/rocodesign/fleet", kind: "delegated", harness: "claude-code" },
+  });
+  let [row] = await db.select().from(sessions).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.equal(row.projectKey, "github.com/rocodesign/fleet");
+  assert.equal(row.kind, "delegated");
+
+  await ingestSnapshot(db, EMAIL, {
+    machine: { id: "box", hostname: "box" },
+    session: { id: "s1", ticketId: "36", delegation: "majordomo-36" },
+    tasks: [],
+  });
+  [row] = await db.select().from(sessions).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.equal(row.ticketId, "36");
+  assert.equal(row.delegation, "majordomo-36");
+  assert.equal(row.projectKey, "github.com/rocodesign/fleet");
+
+  await enrichSession(db, EMAIL, {
+    sessionId: "s1",
+    summary: "Ported the archive tier.",
+    category: "infra",
+    tags: ["cloudflare", "d1"],
+    decisions: ["Keep the raw project column."],
+    summaryVersion: 2,
+    summarizedThrough: "msg-41",
+  });
+  [row] = await db.select().from(sessions).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.equal(row.category, "infra");
+  assert.deepEqual(row.tags, ["cloudflare", "d1"]);
+  assert.deepEqual(row.decisions, ["Keep the raw project column."]);
+  assert.equal(row.summaryVersion, 2);
+  assert.equal(row.summarizedThrough, "msg-41");
+  assert.equal(row.kind, "delegated");
+});

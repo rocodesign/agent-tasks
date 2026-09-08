@@ -65,10 +65,21 @@ export const sessions = sqliteTable(
     machineId: text("machine_id")
       .notNull()
       .references(() => machines.id, { onDelete: "cascade" }),
-    project: text("project"),
+    project: text("project"), // raw cwd as reported; project_key is the normalized identity
+    projectKey: text("project_key"),
+    ticketId: text("ticket_id"),
+    kind: text("kind"), // interactive | delegated | worker | scheduled | subagent
+    delegation: text("delegation"),
+    harness: text("harness"),
+    category: text("category"),
+    decisions: text("decisions", { mode: "json" }).$type<string[]>(),
+    tags: text("tags", { mode: "json" }).$type<string[]>(),
     title: text("title"),
     provider: text("provider"),
     summary: text("summary"), // AI-generated post-session digest; null until enriched
+    summaryVersion: integer("summary_version"),
+    // Opaque transcript cursor from the summarizer; null means no summary was attempted.
+    summarizedThrough: text("summarized_through"),
     summarizedAt: integer("summarized_at", { mode: "timestamp_ms" }),
     status: text("status").notNull().default("active"), // active | idle | ended
     endedReason: text("ended_reason"), // null while live; hook | reaper once ended
@@ -79,6 +90,8 @@ export const sessions = sqliteTable(
   (t) => ({
     accountIdx: index("sessions_account_idx").on(t.accountEmail),
     machineIdx: index("sessions_machine_idx").on(t.machineId),
+    projectKeyIdx: index("sessions_project_key_idx").on(t.projectKey),
+    kindIdx: index("sessions_kind_idx").on(t.kind),
     updatedIdx: index("sessions_updated_idx").on(t.updatedAt),
   }),
 );

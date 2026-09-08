@@ -1,7 +1,7 @@
 import { eq, ne, and, asc, desc, lt, max, isNull, inArray } from "drizzle-orm";
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
-import { normalizeProvider, sessionRelation } from "./session-metadata.ts";
+import { normalizeProvider, pickSessionMeta, sessionRelation, type SessionMeta } from "./session-metadata.ts";
 
 // All data access is account-scoped (multi-tenant). `email` is the authenticated
 // account; machine/session ids are namespaced as `${email}::${rawId}`.
@@ -22,6 +22,7 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
   const machineId = `${email}::${machine.id}`;
   const sessionId = `${email}::${session.id}`;
   const provider = normalizeProvider(session.provider);
+  const meta = pickSessionMeta(session, body);
 
   await db
     .insert(machines)
@@ -51,6 +52,7 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
       status: normalizeSessionStatus(session.status),
       lastActivityAt: now,
       updatedAt: now,
+      ...meta,
     })
     .onConflictDoUpdate({
       target: sessions.id,
@@ -67,6 +69,7 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
         ...(session.project ? { project: session.project } : {}),
         ...(session.title ? { title: session.title } : {}),
         ...(provider ? { provider } : {}),
+        ...meta,
       },
     });
 
@@ -312,6 +315,7 @@ export async function enrichSession(
     .set({
       summarizedAt: now,
       updatedAt: now,
+      ...pickSessionMeta(body),
       ...(body?.summary ? { summary: String(body.summary).slice(0, 8000) } : {}),
       ...(body?.title ? { title: String(body.title).slice(0, 300) } : {}),
     })
@@ -354,6 +358,7 @@ export async function startSession(
     project?: string | null;
     title?: string | null;
     provider?: string | null;
+    meta?: Partial<SessionMeta>;
   },
 ): Promise<{ machineId: string; sessionId: string }> {
   const now = new Date();
@@ -389,6 +394,7 @@ export async function startSession(
       status: "active",
       lastActivityAt: now,
       updatedAt: now,
+      ...(p.meta ?? {}),
     })
     .onConflictDoUpdate({
       target: sessions.id,
@@ -402,6 +408,7 @@ export async function startSession(
         ...(p.project ? { project: p.project } : {}),
         ...(p.title ? { title: p.title } : {}),
         ...(provider ? { provider } : {}),
+        ...(p.meta ?? {}),
       },
     });
 

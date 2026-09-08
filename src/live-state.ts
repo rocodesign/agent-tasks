@@ -14,7 +14,14 @@ import {
   removeSession,
   startSession,
 } from "./store.ts";
-import { normalizeProvider, sessionRelation, type SessionProvider } from "./session-metadata.ts";
+import {
+  mergeSessionMeta,
+  normalizeProvider,
+  pickSessionMeta,
+  sessionRelation,
+  type SessionMeta,
+  type SessionProvider,
+} from "./session-metadata.ts";
 import {
   generateApiKey,
   generateOtp,
@@ -47,7 +54,7 @@ type LiveTask = {
   updatedAt: string;
 };
 
-type LiveSession = {
+type LiveSession = SessionMeta & {
   id: string;
   machineId: string;
   project: string | null;
@@ -502,6 +509,7 @@ function ingestLive(account: DurableState["accounts"][string], email: string, bo
   // Snapshots replace only the live TodoWrite mirror; generated tasks ride along.
   tasks.push(...(previous?.tasks.filter((task) => task.source === "generated") ?? []));
   liveMachine.sessions[sessionId] = {
+    ...mergeSessionMeta(previous, session, body),
     id: sessionId,
     machineId,
     project: session.project ?? previous?.project ?? null,
@@ -542,6 +550,7 @@ function startLive(account: DurableState["accounts"][string], email: string, bod
   const previous = machine.sessions[sessionId];
   const provider = normalizeProvider(body?.provider ?? body?.session?.provider) ?? previous?.provider ?? null;
   machine.sessions[sessionId] = {
+    ...mergeSessionMeta(previous, body, body?.session),
     id: sessionId,
     machineId,
     project: body?.project ?? body?.session?.project ?? previous?.project ?? null,
@@ -604,6 +613,7 @@ function enrichLive(account: DurableState["accounts"][string], email: string, bo
   // fine, the archive event still enriches Postgres.
   if (session) {
     const now = new Date().toISOString();
+    Object.assign(session, pickSessionMeta(body));
     if (body?.title) session.title = String(body.title).slice(0, 300);
     if (body?.summary) session.summary = String(body.summary).slice(0, 8000);
     if (Array.isArray(body?.tasks)) {
@@ -727,6 +737,7 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
         project: event.body?.project ?? event.body?.session?.project ?? null,
         title: event.body?.title ?? event.body?.session?.title ?? null,
         provider: event.body?.provider ?? event.body?.session?.provider ?? null,
+        meta: pickSessionMeta(event.body, event.body?.session),
       });
       break;
     case "ingest":
