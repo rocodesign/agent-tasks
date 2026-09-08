@@ -27,6 +27,11 @@ database_name = "agent-tasks"
 database_id = "80d73b10-696b-4a34-bfb5-28c3d7098120"
 migrations_dir = "drizzle"
 
+# Knowledge store for AI Search: sessions/<slug>/<sessionId>.md written on enrich.
+[[r2_buckets]]
+binding = "KNOWLEDGE"
+bucket_name = "majordomo-knowledge"
+
 # Non-secret config (committed). Override per-env as needed.
 [vars]
 RESEND_FROM = "Fleet <fleet@copaciu.com>"

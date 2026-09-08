@@ -6,6 +6,7 @@ polling dashboard shows the hierarchy **Machine (source) → Session → Tasks**
 - **API + host:** Cloudflare Workers + [Hono]
 - **Live storage:** one SQLite-backed Durable Object; polling and task traffic never reach the archive
 - **Archive:** Cloudflare D1 via Drizzle, flushed hourly and immediately after `SessionEnd`
+- **Knowledge:** each enriched session is written to R2 (`majordomo-knowledge`) as `sessions/<slug>/<sessionId>.md` for AI Search
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
 - **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`), or a JWT from the Sidus shell. Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
 - **Agent integration:** the separate `rococode` plugin reports Claude Code and
@@ -18,6 +19,7 @@ src/
   index.ts          Hono adapter: forwards /api to the Durable Object; serves the SPA
   live-state.ts     deep live-state module: auth, tasks, reads, and archive queue
   store.ts          D1 archive adapter
+  knowledge.ts      R2 session documents for AI Search
   auth.ts           email OTP, Resend send, API-key mint/hash, allowlist
   shell-jwt.ts      shell JWT verification against the shell JWKS
   db/

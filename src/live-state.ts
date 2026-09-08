@@ -32,6 +32,7 @@ import {
   sha256Hex,
 } from "./auth.ts";
 import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt.ts";
+import { deleteSessionKnowledge, writeSessionKnowledge } from "./knowledge.ts";
 import {
   matchesMachineFilter,
   matchesSessionFilters,
@@ -41,6 +42,7 @@ import {
 
 export type Bindings = {
   DB: D1Database;
+  KNOWLEDGE: R2Bucket;
   RESEND_API_KEY: string;
   RESEND_FROM?: string;
   ALLOWED_EMAILS?: string;
@@ -417,7 +419,7 @@ export class LiveState {
         await db.insert(accounts).values({ email }).onConflictDoNothing();
       }
       for (const event of events) {
-        await archiveEvent(db, event);
+        await archiveEvent(db, event, this.env);
         delete state.archive[event.id];
       }
     } catch (error) {
@@ -742,7 +744,7 @@ function buildLiveTree(account: DurableState["accounts"][string], email: string,
     .filter((machine) => machine.sessions.length > 0);
 }
 
-async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent): Promise<void> {
+async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent, env: Bindings): Promise<void> {
   switch (event.kind) {
     case "api-key":
       await db.insert(apiKeys).values({ ...event.body, email: event.email }).onConflictDoNothing();
@@ -777,11 +779,16 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
       }
       break;
     case "remove":
+      if (env.KNOWLEDGE) await deleteSessionKnowledge(db, env.KNOWLEDGE, event.email, String(event.body.sessionId));
       await removeSession(db, event.email, String(event.body.sessionId));
       break;
-    case "enrich":
-      await enrichSession(db, event.email, event.body);
+    case "enrich": {
+      const enriched = await enrichSession(db, event.email, event.body);
+      if (enriched.enriched && env.KNOWLEDGE) {
+        await writeSessionKnowledge(db, env.KNOWLEDGE, event.email, enriched.enriched, event.body);
+      }
       break;
+    }
     case "title":
       await titleSession(db, event.email, event.body);
       break;
