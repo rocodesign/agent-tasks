@@ -38,9 +38,11 @@ drizzle/            SQLite migrations, applied with `wrangler d1 migrations appl
 | POST | `/api/session/end` | yes | End a hook session |
 | POST | `/api/session/remove` | yes | Permanently remove a session |
 | POST | `/api/dismiss` | yes | User defers a task from the UI (persists across re-ingests) |
+| POST | `/api/task/complete` | yes | Mark a task done by name (`sessionId`, `taskName`) |
 | GET | `/api/dismissals` | yes | Un-acknowledged deferrals for a session |
 | GET | `/api/version` | yes | Durable Object version counter for the poller |
-| GET | `/api/tree` | yes | Full Machine → Session → Tasks hierarchy |
+| GET | `/api/tree` | yes | Full Machine → Session → Tasks hierarchy; `?project=` `?kind=` `?delegation=` `?machine=` |
+| GET | `/api/history/sessions` | yes | Summarized sessions from D1; same filters plus `?since=` `?all=1` `?limit=` |
 | GET | `/health` | no | Health check |
 | GET | `*` | no | Static SPA |
 

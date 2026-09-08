@@ -232,6 +232,28 @@ export async function listDismissals(db: DB, email: string, sessionId: string): 
   return rows.map((r) => r.taskName);
 }
 
+// Generated tasks close out through this endpoint (/harvest) or through /api/dismiss.
+// Idempotent by name, like a dismissal.
+export async function completeTask(
+  db: DB,
+  email: string,
+  sessionId: string,
+  taskName: string,
+): Promise<{ error?: string }> {
+  const id = namespaced(email, sessionId);
+  const owns = await db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(and(eq(sessions.id, id), eq(sessions.accountEmail, email)))
+    .limit(1);
+  if (!owns.length) return { error: "not_found" };
+  await db
+    .update(tasks)
+    .set({ status: "completed", updatedAt: new Date() })
+    .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, id), eq(tasks.name, taskName)));
+  return {};
+}
+
 export async function dismissTask(
   db: DB,
   email: string,
@@ -381,24 +403,37 @@ export async function enrichSession(
   if (!updated.length) return { error: "not_found" };
 
   if (Array.isArray(body?.tasks)) {
+    const settled = await settledGeneratedTasks(db, sessionId);
     const rows = body.tasks
-      .map((t: any, i: number) => ({
-        id: `${sessionId}::gen::${i}`,
-        accountEmail: email,
-        sessionId,
-        name: String(t?.name ?? t?.content ?? "").slice(0, 2000),
-        status: normalizeTaskStatus(t?.status),
-        source: "generated",
-        position: i,
-        createdAt: now,
-        updatedAt: now,
-      }))
+      .map((t: any, i: number) => {
+        const name = String(t?.name ?? t?.content ?? "").slice(0, 2000);
+        return {
+          id: `${sessionId}::gen::${i}`,
+          accountEmail: email,
+          sessionId,
+          name,
+          // A follow-up the user already closed stays closed when the summarizer regenerates it.
+          status: settled.get(name) ?? normalizeTaskStatus(t?.status),
+          source: "generated",
+          position: i,
+          createdAt: now,
+          updatedAt: now,
+        };
+      })
       .filter((row: any) => row.name);
     const ops: any[] = [db.delete(tasks).where(and(eq(tasks.sessionId, sessionId), eq(tasks.source, "generated")))];
     if (rows.length) ops.push(db.insert(tasks).values(rows));
     await db.batch(ops as any);
   }
   return { enriched: sessionId };
+}
+
+export async function settledGeneratedTasks(db: DB, sessionId: string): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ name: tasks.name, status: tasks.status })
+    .from(tasks)
+    .where(and(eq(tasks.sessionId, sessionId), eq(tasks.source, "generated")));
+  return new Map(rows.filter((row) => row.status === "completed" || row.status === "deferred").map((row) => [row.name, row.status]));
 }
 
 // Register (or re-activate) a session with NO tasks, so it appears on the dashboard the
@@ -480,6 +515,11 @@ export async function removeSession(db: DB, email: string, fullSessionId: string
 }
 
 // ---- helpers --------------------------------------------------------------
+export function namespaced(email: string, sessionId: string): string {
+  const prefix = `${email}::`;
+  return sessionId.startsWith(prefix) ? sessionId : `${prefix}${sessionId}`;
+}
+
 export function groupBy<T, K>(arr: T[], keyFn: (x: T) => K): Map<K, T[]> {
   const m = new Map<K, T[]>();
   for (const x of arr) {

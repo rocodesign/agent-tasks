@@ -4,6 +4,7 @@ import { accounts, dismissals, sessions, tasks } from "../src/db/schema.ts";
 import { eq } from "drizzle-orm";
 import {
   buildTree,
+  completeTask,
   computeVersion,
   dismissTask,
   endSession,
@@ -242,4 +243,47 @@ test("history returns generated tasks and honours all= and limit=", async (t) =>
   assert.deepEqual(row.generatedTasks.map((task) => task.name), ["follow up"]);
   assert.equal((await listHistorySessions(db, EMAIL, { ...NO_FILTERS, all: true })).length, 2);
   assert.equal((await listHistorySessions(db, EMAIL, { ...NO_FILTERS, all: true, limit: 1 })).length, 1);
+});
+
+test("completes a generated task by name and keeps that status through re-enrichment", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1" });
+  await enrichSession(db, EMAIL, {
+    sessionId: "s1",
+    summary: "first pass",
+    tasks: [{ name: "apply remote migrations" }, { name: "import the dump" }, { name: "write the R2 object" }],
+  });
+
+  assert.deepEqual(await completeTask(db, EMAIL, "s1", "apply remote migrations"), {});
+  await dismissTask(db, EMAIL, `${EMAIL}::s1`, "import the dump");
+
+  await enrichSession(db, EMAIL, {
+    sessionId: "s1",
+    summary: "second pass",
+    tasks: [{ name: "apply remote migrations" }, { name: "import the dump" }, { name: "write the R2 object" }],
+  });
+  const rows = await db.select().from(tasks).where(eq(tasks.sessionId, `${EMAIL}::s1`));
+  assert.deepEqual(
+    Object.fromEntries(rows.map((row) => [row.name, row.status])),
+    {
+      "apply remote migrations": "completed",
+      "import the dump": "deferred",
+      "write the R2 object": "pending",
+    },
+  );
+});
+
+test("refuses to complete a task on a session from another account", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await db.insert(accounts).values({ email: "stranger@example.com" });
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1" });
+  await enrichSession(db, EMAIL, { sessionId: "s1", summary: "x", tasks: [{ name: "follow up" }] });
+
+  assert.deepEqual(await completeTask(db, "stranger@example.com", "s1", "follow up"), { error: "not_found" });
+  const [row] = await db.select().from(tasks).where(eq(tasks.sessionId, `${EMAIL}::s1`));
+  assert.equal(row.status, "pending");
 });

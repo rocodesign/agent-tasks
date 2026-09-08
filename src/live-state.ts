@@ -1,6 +1,7 @@
 import { createDb } from "./db/client.ts";
 import { accounts, apiKeys } from "./db/schema.ts";
 import {
+  completeTask,
   dismissTask,
   endLatestSession,
   endSession,
@@ -93,7 +94,7 @@ type Verification = {
 
 type ArchiveEvent = {
   id: string;
-  kind: "api-key" | "start" | "ingest" | "dismiss" | "end" | "remove" | "enrich" | "title";
+  kind: "api-key" | "start" | "ingest" | "dismiss" | "complete" | "end" | "remove" | "enrich" | "title";
   email: string;
   body: any;
   queuedAt: number;
@@ -231,6 +232,19 @@ export class LiveState {
       queue(state, {
         id: `dismiss:${email}:${body.sessionId}:${body.taskName}`,
         kind: "dismiss",
+        email,
+        body,
+      });
+      await this.changed(state);
+      return json({ ok: true });
+    }
+    if (path === "/api/task/complete" && request.method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      const result = completeLive(account, email, body);
+      if ("error" in result) return json({ error: result.error }, 400);
+      queue(state, {
+        id: `complete:${email}:${body.sessionId}:${body.taskName}`,
+        kind: "complete",
         email,
         body,
       });
@@ -597,18 +611,26 @@ function enrichLive(account: DurableState["accounts"][string], email: string, bo
     if (body?.title) session.title = String(body.title).slice(0, 300);
     if (body?.summary) session.summary = String(body.summary).slice(0, 8000);
     if (Array.isArray(body?.tasks)) {
+      const settled = new Map(
+        session.tasks
+          .filter((task) => task.source === "generated" && (task.status === "completed" || task.status === "deferred"))
+          .map((task) => [task.name, task.status]),
+      );
       session.tasks = session.tasks.filter((task) => task.source !== "generated");
       session.tasks.push(
         ...body.tasks
-          .map((task: any, position: number) => ({
-            id: `${session.id}::gen::${position}`,
-            name: String(task?.name ?? task?.content ?? "").slice(0, 2000),
-            status: normalizeTaskStatus(task?.status),
-            source: "generated",
-            position,
-            createdAt: now,
-            updatedAt: now,
-          }))
+          .map((task: any, position: number) => {
+            const name = String(task?.name ?? task?.content ?? "").slice(0, 2000);
+            return {
+              id: `${session.id}::gen::${position}`,
+              name,
+              status: settled.get(name) ?? normalizeTaskStatus(task?.status),
+              source: "generated",
+              position,
+              createdAt: now,
+              updatedAt: now,
+            };
+          })
           .filter((task: LiveTask) => task.name),
       );
     }
@@ -616,6 +638,22 @@ function enrichLive(account: DurableState["accounts"][string], email: string, bo
     account.version = Date.now();
   }
   return { enriched: session?.id ?? null };
+}
+
+function completeLive(account: DurableState["accounts"][string], email: string, body: any) {
+  const sessionId = String(body?.sessionId ?? "");
+  const taskName = String(body?.taskName ?? "");
+  if (!sessionId || !taskName) return { error: "sessionId and taskName are required" } as const;
+  const session = findSession(account, `${email}::${sessionId}`) ?? findSession(account, sessionId);
+  // Live state drops ended cards after an hour; the archive event still completes the task.
+  if (!session) return {};
+  const task = session.tasks.find((candidate) => candidate.name === taskName);
+  if (task) {
+    task.status = "completed";
+    task.updatedAt = new Date().toISOString();
+  }
+  account.version = Date.now();
+  return {};
 }
 
 function dismissLive(account: DurableState["accounts"][string], body: any) {
@@ -727,6 +765,9 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
       break;
     case "dismiss":
       await dismissTask(db, event.email, String(event.body.sessionId), String(event.body.taskName));
+      break;
+    case "complete":
+      await completeTask(db, event.email, String(event.body.sessionId), String(event.body.taskName));
       break;
     case "end":
       if (event.body?.sessionId) {
