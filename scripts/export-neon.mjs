@@ -1,4 +1,3 @@
-// One-off Neon -> JSON dump, used once to seed D1. Reads DATABASE_URL from .env.
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

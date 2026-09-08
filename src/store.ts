@@ -232,8 +232,6 @@ export async function listDismissals(db: DB, email: string, sessionId: string): 
   return rows.map((r) => r.taskName);
 }
 
-// Generated tasks close out through this endpoint (/harvest) or through /api/dismiss.
-// Idempotent by name, like a dismissal.
 export async function completeTask(
   db: DB,
   email: string,

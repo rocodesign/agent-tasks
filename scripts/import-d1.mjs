@@ -1,5 +1,3 @@
-// One-off loader: pushes the Neon dump in scripts/export/ into D1.
-// Usage: node scripts/import-d1.mjs [--local]   (default: --remote)
 import { readFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
@@ -14,7 +12,6 @@ const ROWS_PER_FILE = 200;
 // Parents before children: D1 enforces foreign keys.
 const TABLES = ["accounts", "machines", "sessions", "tasks", "dismissals", "api_keys", "verification"];
 
-// Postgres timestamptz columns become epoch-millisecond integers in SQLite.
 const TIMESTAMP_COLUMNS = new Set([
   "created_at",
   "updated_at",
@@ -71,9 +68,11 @@ if (!files.length) {
 
 for (const { file, table, rows } of files) {
   console.log(`importing ${rows} row(s) into ${table} from ${file}`);
+  // Spawning the wrangler entry with node avoids the shell quoting and the .cmd
+  // restriction that break `npx wrangler` as a child process on Windows.
   const result = spawnSync(
-    process.platform === "win32" ? "npx.cmd" : "npx",
-    ["wrangler", "d1", "execute", "agent-tasks", target, "--yes", "--file", file],
+    process.execPath,
+    [resolve(root, "node_modules/wrangler/bin/wrangler.js"), "d1", "execute", "agent-tasks", target, "--yes", "--file", file],
     { stdio: "inherit", cwd: root },
   );
   if (result.status !== 0) {

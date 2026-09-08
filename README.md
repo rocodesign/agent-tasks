@@ -137,6 +137,19 @@ npm run deploy
 
 Serves at `fleet.copaciu.com` (and the `*.workers.dev` URL).
 
+## One-off Neon import
+
+The archive used to live in Neon Postgres. `scripts/export-neon.mjs` dumps every
+table to `scripts/export/*.json` (reads `DATABASE_URL` from `.env`);
+`scripts/import-d1.mjs` turns that dump into batched SQL and applies it, `--local`
+for a rehearsal and remote by default:
+
+```sh
+node scripts/export-neon.mjs
+npm run db:migrate:remote
+node scripts/import-d1.mjs
+```
+
 ## Live/archive behavior
 
 Every accepted mutation is persisted to Durable Object storage before the API
