@@ -9,6 +9,7 @@ import {
   endSession,
   enrichSession,
   ingestSnapshot,
+  listHistorySessions,
   purgeOldEndedSessions,
   reapStaleSessions,
   removeSession,
@@ -18,6 +19,7 @@ import {
 import { freshDb } from "./helpers/d1.ts";
 
 const EMAIL = "romeo@example.com";
+const NO_FILTERS = { project: null, kind: null, delegation: null, machine: null };
 
 async function seeded() {
   const harness = await freshDb();
@@ -176,4 +178,68 @@ test("stores the enrichment fields from start, ingest and enrich", async (t) => 
   assert.equal(row.summaryVersion, 2);
   assert.equal(row.summarizedThrough, "msg-41");
   assert.equal(row.kind, "delegated");
+});
+
+test("history filters by project, kind, delegation and machine", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  const seed = async (id: string, meta: Record<string, unknown>, machine = "box") => {
+    await startSession(db, EMAIL, {
+      machineId: machine,
+      hostname: machine === "box" ? "BOX-1" : machine,
+      sessionId: id,
+      project: "D:/Work/sidus/fleet",
+      meta,
+    });
+    await enrichSession(db, EMAIL, { sessionId: id, summary: `summary ${id}` });
+  };
+  await seed("interactive", { projectKey: "fleet", kind: "interactive" });
+  await seed("worker", { projectKey: "fleet", kind: "worker", delegation: "d-1" });
+  await seed("child", { projectKey: "fleet", kind: "subagent" });
+  await seed("cron", { projectKey: "fleet", kind: "scheduled" });
+  await seed("other", { projectKey: "wiki", kind: "interactive" }, "laptop");
+
+  const shortIds = (rows: { id: string }[]) => rows.map((row) => row.id.replace(`${EMAIL}::`, "")).sort();
+
+  assert.deepEqual(shortIds(await listHistorySessions(db, EMAIL, { ...NO_FILTERS })), [
+    "interactive",
+    "other",
+    "worker",
+  ]);
+  assert.deepEqual(shortIds(await listHistorySessions(db, EMAIL, { ...NO_FILTERS, kind: "subagent" })), ["child"]);
+  assert.deepEqual(shortIds(await listHistorySessions(db, EMAIL, { ...NO_FILTERS, project: "fleet" })), [
+    "interactive",
+    "worker",
+  ]);
+  assert.deepEqual(shortIds(await listHistorySessions(db, EMAIL, { ...NO_FILTERS, delegation: "d-1" })), ["worker"]);
+  assert.deepEqual(shortIds(await listHistorySessions(db, EMAIL, { ...NO_FILTERS, machine: "laptop" })), ["other"]);
+  assert.deepEqual(shortIds(await listHistorySessions(db, EMAIL, { ...NO_FILTERS, machine: "BOX-1" })), [
+    "interactive",
+    "worker",
+  ]);
+});
+
+test("history falls back to the raw project for rows without a project key", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "legacy", project: "D:/Work/fleet" });
+  await enrichSession(db, EMAIL, { sessionId: "legacy", summary: "old row" });
+  assert.equal((await listHistorySessions(db, EMAIL, { ...NO_FILTERS, project: "D:/Work/fleet" })).length, 1);
+  assert.equal((await listHistorySessions(db, EMAIL, { ...NO_FILTERS, project: "fleet" })).length, 0);
+});
+
+test("history returns generated tasks and honours all= and limit=", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1" });
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s2" });
+  await enrichSession(db, EMAIL, { sessionId: "s1", summary: "done", tasks: [{ name: "follow up" }] });
+
+  const [row] = await listHistorySessions(db, EMAIL, { ...NO_FILTERS });
+  assert.deepEqual(row.generatedTasks.map((task) => task.name), ["follow up"]);
+  assert.equal((await listHistorySessions(db, EMAIL, { ...NO_FILTERS, all: true })).length, 2);
+  assert.equal((await listHistorySessions(db, EMAIL, { ...NO_FILTERS, all: true, limit: 1 })).length, 1);
 });

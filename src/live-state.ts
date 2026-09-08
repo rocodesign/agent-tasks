@@ -1,14 +1,13 @@
-import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
 import { createDb } from "./db/client.ts";
-import { accounts, apiKeys, sessions as sessionsTable, tasks as tasksTable } from "./db/schema.ts";
+import { accounts, apiKeys } from "./db/schema.ts";
 import {
   dismissTask,
   endLatestSession,
   endSession,
   enrichSession,
   titleSession,
-  groupBy,
   ingestSnapshot,
+  listHistorySessions,
   purgeOldEndedSessions,
   reapStaleSessions,
   removeSession,
@@ -32,6 +31,12 @@ import {
   sha256Hex,
 } from "./auth.ts";
 import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt.ts";
+import {
+  matchesMachineFilter,
+  matchesSessionFilters,
+  readSessionFilters,
+  type SessionFilters,
+} from "./session-filters.ts";
 
 export type Bindings = {
   DB: D1Database;
@@ -150,7 +155,7 @@ export class LiveState {
       return json({ version: account.version });
     }
     if (path === "/api/tree" && request.method === "GET") {
-      return json({ machines: buildLiveTree(account, email) });
+      return json({ machines: buildLiveTree(account, email, readSessionFilters(url)) });
     }
     if (path === "/api/ingest" && request.method === "POST") {
       const body: any = await request.json().catch(() => null);
@@ -253,43 +258,18 @@ export class LiveState {
     return json({ error: "not_found" }, 404);
   }
 
-  // Durable session history for the orchestrator: enriched (summarized) sessions from
-  // Postgres, newest first, with their generated follow-up tasks. Filters: ?project=,
-  // ?since= (ISO date), ?all=1 (include unsummarized), ?limit= (default 50, max 500).
+  // Durable session history for the orchestrator: summarized sessions from D1, newest
+  // first, with their generated follow-up tasks. Filters: ?project=, ?kind=, ?delegation=,
+  // ?machine=, ?since= (ISO date), ?all=1 (include unsummarized), ?limit= (default 50, max 500).
   private async historySessions(url: URL, email: string): Promise<Response> {
     try {
-      const db = createDb(this.env.DB);
-      const project = url.searchParams.get("project");
-      const since = url.searchParams.get("since");
-      const includeAll = url.searchParams.get("all") === "1";
-      const limit = Math.min(Number(url.searchParams.get("limit") ?? 50) || 50, 500);
-
-      const conditions = [eq(sessionsTable.accountEmail, email)];
-      if (!includeAll) conditions.push(isNotNull(sessionsTable.summary));
-      if (project) conditions.push(eq(sessionsTable.project, project));
-      if (since && !Number.isNaN(Date.parse(since))) {
-        conditions.push(gte(sessionsTable.lastActivityAt, new Date(since)));
-      }
-
-      const sessionRows = await db
-        .select()
-        .from(sessionsTable)
-        .where(and(...conditions))
-        .orderBy(desc(sessionsTable.lastActivityAt))
-        .limit(limit);
-      const ids = sessionRows.map((row) => row.id);
-      const taskRows = ids.length
-        ? await db.select().from(tasksTable).where(and(eq(tasksTable.accountEmail, email), eq(tasksTable.source, "generated")))
-        : [];
-      const tasksBySession = groupBy(taskRows.filter((task) => ids.includes(task.sessionId)), (task) => task.sessionId);
-
-      return json({
-        sessions: sessionRows.map((row) => ({
-          ...row,
-          shortId: stripAccount(email, row.id),
-          generatedTasks: tasksBySession.get(row.id) ?? [],
-        })),
+      const rows = await listHistorySessions(createDb(this.env.DB), email, {
+        ...readSessionFilters(url),
+        since: url.searchParams.get("since"),
+        all: url.searchParams.get("all") === "1",
+        limit: Number(url.searchParams.get("limit") ?? 50) || 50,
       });
+      return json({ sessions: rows.map((row) => ({ ...row, shortId: stripAccount(email, row.id) })) });
     } catch (error) {
       return json({ error: "history_failed", detail: String(error) }, 500);
     }
@@ -704,13 +684,14 @@ function pruneLive(state: DurableState) {
   return { reapedLive, droppedLive };
 }
 
-function buildLiveTree(account: DurableState["accounts"][string], email: string) {
+function buildLiveTree(account: DurableState["accounts"][string], email: string, filters: SessionFilters) {
   return Object.values(account.machines)
-    .filter((machine) => Object.keys(machine.sessions).length > 0)
+    .filter((machine) => matchesMachineFilter(machine, email, filters.machine))
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
     .map((machine) => ({
       ...machine,
       sessions: Object.values(machine.sessions)
+        .filter((session) => matchesSessionFilters(session, filters))
         .map((session) => ({
           ...session,
           provider: session.provider ?? null,
@@ -719,7 +700,8 @@ function buildLiveTree(account: DurableState["accounts"][string], email: string)
           ...sessionRelation(session.id),
         }))
         .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
-    }));
+    }))
+    .filter((machine) => machine.sessions.length > 0);
 }
 
 async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent): Promise<void> {

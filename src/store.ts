@@ -1,6 +1,7 @@
-import { eq, ne, and, asc, desc, lt, max, isNull, inArray } from "drizzle-orm";
+import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray, inArray } from "drizzle-orm";
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
+import { HISTORY_HIDDEN_KINDS, type SessionFilters } from "./session-filters.ts";
 import { normalizeProvider, pickSessionMeta, sessionRelation, type SessionMeta } from "./session-metadata.ts";
 
 // All data access is account-scoped (multi-tenant). `email` is the authenticated
@@ -153,6 +154,62 @@ export async function buildTree(db: DB, email: string) {
           new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime(),
       ),
   }));
+}
+
+// Durable session history for the orchestrator: summarized sessions, newest first, with
+// their generated follow-up tasks. `project` matches the normalized project_key first and
+// falls back to the raw cwd of rows that predate it. Without an explicit `kind`, the
+// automated kinds stay out of the answer.
+export async function listHistorySessions(
+  db: DB,
+  email: string,
+  params: SessionFilters & { since?: string | null; all?: boolean; limit?: number },
+) {
+  const conditions = [eq(sessions.accountEmail, email)];
+  if (!params.all) conditions.push(isNotNull(sessions.summary));
+  if (params.project) {
+    conditions.push(
+      or(eq(sessions.projectKey, params.project), and(isNull(sessions.projectKey), eq(sessions.project, params.project)))!,
+    );
+  }
+  if (params.kind) conditions.push(eq(sessions.kind, params.kind));
+  else conditions.push(or(isNull(sessions.kind), notInArray(sessions.kind, HISTORY_HIDDEN_KINDS))!);
+  if (params.delegation) conditions.push(eq(sessions.delegation, params.delegation));
+  if (params.machine) {
+    conditions.push(
+      inArray(
+        sessions.machineId,
+        db
+          .select({ id: machines.id })
+          .from(machines)
+          .where(
+            and(
+              eq(machines.accountEmail, email),
+              or(eq(machines.hostname, params.machine), eq(machines.id, `${email}::${params.machine}`)),
+            ),
+          ),
+      ),
+    );
+  }
+  if (params.since && !Number.isNaN(Date.parse(params.since))) {
+    conditions.push(gte(sessions.lastActivityAt, new Date(params.since)));
+  }
+
+  const rows = await db
+    .select()
+    .from(sessions)
+    .where(and(...conditions))
+    .orderBy(desc(sessions.lastActivityAt))
+    .limit(Math.min(params.limit || 50, 500));
+  if (!rows.length) return [];
+
+  const ids = rows.map((row) => row.id);
+  const generated = await db
+    .select()
+    .from(tasks)
+    .where(and(eq(tasks.accountEmail, email), eq(tasks.source, "generated"), inArray(tasks.sessionId, ids)));
+  const bySession = groupBy(generated, (task) => task.sessionId);
+  return rows.map((row) => ({ ...row, generatedTasks: bySession.get(row.id) ?? [] }));
 }
 
 export async function computeVersion(db: DB, email: string): Promise<number> {
