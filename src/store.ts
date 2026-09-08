@@ -328,9 +328,10 @@ export async function endLatestSession(
 // instead of leaving it "active" forever. Set a touch past the UI's 30m stale mark so a
 // merely-quiet session (mid-build, between task reports) isn't ended out from under itself.
 const REAP_AFTER_MS = 45 * 60_000;
-// Ended sessions are hidden from the tree after 5m; hard-delete them after a week so the
-// table doesn't grow unbounded (FK cascade removes their tasks + dismissals).
-const PURGE_ENDED_AFTER_MS = 7 * 24 * 60 * 60_000;
+// Ended sessions are hidden from the tree after 5m; hard-delete the ones nothing ever
+// summarized after 30 days so the table doesn't grow unbounded (FK cascade removes their
+// tasks + dismissals).
+const PURGE_ENDED_AFTER_MS = 30 * 24 * 60 * 60_000;
 
 export async function reapStaleSessions(db: DB): Promise<{ ended: number }> {
   const cutoff = new Date(Date.now() - REAP_AFTER_MS);
@@ -344,11 +345,19 @@ export async function reapStaleSessions(db: DB): Promise<{ ended: number }> {
 
 export async function purgeOldEndedSessions(db: DB): Promise<{ removed: number }> {
   const cutoff = new Date(Date.now() - PURGE_ENDED_AFTER_MS);
-  // Summarized sessions are the durable session history the orchestrator reads —
-  // only unsummarized (trivial/unenriched) ended sessions age out.
+  // Summarized sessions are the durable session history the orchestrator reads. A row
+  // with a transcript cursor but no summary means the summarizer ran and produced
+  // nothing usable, so it is history too: one failed window must not erase it.
   const rows = await db
     .delete(sessions)
-    .where(and(eq(sessions.status, "ended"), lt(sessions.updatedAt, cutoff), isNull(sessions.summary)))
+    .where(
+      and(
+        eq(sessions.status, "ended"),
+        lt(sessions.updatedAt, cutoff),
+        isNull(sessions.summary),
+        isNull(sessions.summarizedThrough),
+      ),
+    )
     .returning({ id: sessions.id });
   return { removed: rows.length };
 }

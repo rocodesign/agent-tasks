@@ -287,3 +287,24 @@ test("refuses to complete a task on a session from another account", async (t) =
   const [row] = await db.select().from(tasks).where(eq(tasks.sessionId, `${EMAIL}::s1`));
   assert.equal(row.status, "pending");
 });
+
+test("purges only ended rows that no summarizer ever reached", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  const age = (days: number) => new Date(Date.now() - days * 24 * 60 * 60_000);
+  const seed = async (id: string, updatedAt: Date, meta: Record<string, unknown> = {}) => {
+    await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: id, meta });
+    await endSession(db, EMAIL, id);
+    await db.update(sessions).set({ updatedAt }).where(eq(sessions.id, `${EMAIL}::${id}`));
+  };
+  await seed("forgotten", age(40));
+  await seed("recent", age(10));
+  await seed("attempted", age(40), { summarizedThrough: "msg-12" });
+  await seed("summarized", age(40));
+  await db.update(sessions).set({ summary: "kept" }).where(eq(sessions.id, `${EMAIL}::summarized`));
+
+  assert.deepEqual(await purgeOldEndedSessions(db), { removed: 1 });
+  const left = (await db.select({ id: sessions.id }).from(sessions)).map((row) => row.id.replace(`${EMAIL}::`, "")).sort();
+  assert.deepEqual(left, ["attempted", "recent", "summarized"]);
+});
