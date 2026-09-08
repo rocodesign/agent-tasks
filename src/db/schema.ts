@@ -1,15 +1,18 @@
-import { pgTable, text, integer, timestamp, index, primaryKey } from "drizzle-orm/pg-core";
+import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core";
 
-// Plain Postgres DDL — no vendor extensions. Multi-tenant: every row is owned by an
+// Plain SQLite DDL for Cloudflare D1. Multi-tenant: every row is owned by an
 // account (email). Machine/session ids are surrogate `${email}::${rawId}` so two
 // accounts can use the same hostname/session id without colliding.
+// Timestamps are epoch milliseconds; `computeVersion` compares them directly.
 
-export const accounts = pgTable("accounts", {
+const now = () => new Date();
+
+export const accounts = sqliteTable("accounts", {
   email: text("email").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
 });
 
-export const apiKeys = pgTable(
+export const apiKeys = sqliteTable(
   "api_keys",
   {
     id: text("id").primaryKey(),
@@ -18,21 +21,21 @@ export const apiKeys = pgTable(
       .references(() => accounts.email, { onDelete: "cascade" }),
     keyHash: text("key_hash").notNull().unique(), // sha-256 hex; plaintext shown once
     prefix: text("prefix").notNull(), // e.g. "at_AbCdEf" for display
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
   },
   (t) => ({ emailIdx: index("api_keys_email_idx").on(t.email) }),
 );
 
 // Email OTP codes. One active code per identifier; value is "code:attempts".
-export const verification = pgTable("verification", {
+export const verification = sqliteTable("verification", {
   identifier: text("identifier").primaryKey(), // email address
   value: text("value").notNull(),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
 });
 
-export const machines = pgTable(
+export const machines = sqliteTable(
   "machines",
   {
     id: text("id").primaryKey(), // `${email}::${rawId}`
@@ -42,9 +45,9 @@ export const machines = pgTable(
     hostname: text("hostname").notNull(),
     os: text("os"),
     label: text("label"),
-    firstSeen: timestamp("first_seen", { withTimezone: true }).notNull().defaultNow(),
-    lastSeen: timestamp("last_seen", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    firstSeen: integer("first_seen", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    lastSeen: integer("last_seen", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
   },
   (t) => ({
     accountIdx: index("machines_account_idx").on(t.accountEmail),
@@ -52,7 +55,7 @@ export const machines = pgTable(
   }),
 );
 
-export const sessions = pgTable(
+export const sessions = sqliteTable(
   "sessions",
   {
     id: text("id").primaryKey(), // `${email}::${rawSessionId}`
@@ -66,12 +69,12 @@ export const sessions = pgTable(
     title: text("title"),
     provider: text("provider"),
     summary: text("summary"), // AI-generated post-session digest; null until enriched
-    summarizedAt: timestamp("summarized_at", { withTimezone: true }),
+    summarizedAt: integer("summarized_at", { mode: "timestamp_ms" }),
     status: text("status").notNull().default("active"), // active | idle | ended
     endedReason: text("ended_reason"), // null while live; hook | reaper once ended
-    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
-    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    lastActivityAt: integer("last_activity_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
   },
   (t) => ({
     accountIdx: index("sessions_account_idx").on(t.accountEmail),
@@ -80,7 +83,7 @@ export const sessions = pgTable(
   }),
 );
 
-export const tasks = pgTable(
+export const tasks = sqliteTable(
   "tasks",
   {
     id: text("id").primaryKey(), // `${sessionId}::${position}`
@@ -94,8 +97,8 @@ export const tasks = pgTable(
     status: text("status").notNull().default("pending"), // pending | in_progress | completed | cancelled | deferred
     source: text("source").notNull().default("live"), // live (TodoWrite mirror) | generated (post-session extraction)
     position: integer("position").notNull().default(0),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
   },
   (t) => ({
     accountIdx: index("tasks_account_idx").on(t.accountEmail),
@@ -105,7 +108,7 @@ export const tasks = pgTable(
 );
 
 // User dismissals; survive the agent's full-snapshot re-ingests.
-export const dismissals = pgTable(
+export const dismissals = sqliteTable(
   "dismissals",
   {
     sessionId: text("session_id")
@@ -115,8 +118,8 @@ export const dismissals = pgTable(
     accountEmail: text("account_email")
       .notNull()
       .references(() => accounts.email, { onDelete: "cascade" }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    acknowledgedAt: integer("acknowledged_at", { mode: "timestamp_ms" }),
   },
   (t) => ({ pk: primaryKey({ columns: [t.sessionId, t.taskName] }) }),
 );

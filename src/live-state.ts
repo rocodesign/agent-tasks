@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, isNotNull } from "drizzle-orm";
-import { createDb } from "./db/client";
-import { accounts, apiKeys, sessions as sessionsTable, tasks as tasksTable } from "./db/schema";
+import { createDb } from "./db/client.ts";
+import { accounts, apiKeys, sessions as sessionsTable, tasks as tasksTable } from "./db/schema.ts";
 import {
   dismissTask,
   endLatestSession,
@@ -13,8 +13,8 @@ import {
   reapStaleSessions,
   removeSession,
   startSession,
-} from "./store";
-import { normalizeProvider, sessionRelation, type SessionProvider } from "./session-metadata";
+} from "./store.ts";
+import { normalizeProvider, sessionRelation, type SessionProvider } from "./session-metadata.ts";
 import {
   generateApiKey,
   generateOtp,
@@ -23,11 +23,11 @@ import {
   OTP_TTL_MS,
   sendOtpEmail,
   sha256Hex,
-} from "./auth";
-import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt";
+} from "./auth.ts";
+import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt.ts";
 
 export type Bindings = {
-  DATABASE_URL: string;
+  DB: D1Database;
   RESEND_API_KEY: string;
   RESEND_FROM?: string;
   ALLOWED_EMAILS?: string;
@@ -251,7 +251,7 @@ export class LiveState {
   // ?since= (ISO date), ?all=1 (include unsummarized), ?limit= (default 50, max 500).
   private async historySessions(url: URL, email: string): Promise<Response> {
     try {
-      const db = createDb(this.env.DATABASE_URL);
+      const db = createDb(this.env.DB);
       const project = url.searchParams.get("project");
       const since = url.searchParams.get("since");
       const includeAll = url.searchParams.get("all") === "1";
@@ -381,7 +381,7 @@ export class LiveState {
     let reaped = 0;
     let purged = 0;
     try {
-      const db = createDb(this.env.DATABASE_URL);
+      const db = createDb(this.env.DB);
       reaped = (await reapStaleSessions(db)).ended;
       purged = (await purgeOldEndedSessions(db)).removed;
     } catch (error) {
@@ -411,7 +411,7 @@ export class LiveState {
     const events = Object.values(state.archive).sort((a, b) => a.queuedAt - b.queuedAt);
     if (!events.length) return;
     try {
-      const db = createDb(this.env.DATABASE_URL);
+      const db = createDb(this.env.DB);
       for (const email of new Set(events.map((event) => event.email))) {
         await db.insert(accounts).values({ email }).onConflictDoNothing();
       }

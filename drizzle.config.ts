@@ -1,13 +1,9 @@
-import "dotenv/config";
 import { defineConfig } from "drizzle-kit";
 
-// Reads DATABASE_URL from .env. This is the ONLY vendor-specific touch point:
-// swap the connection string to move off Neon to any standard Postgres.
+// Generate only: migrations are applied with `wrangler d1 migrations apply`
+// (npm run db:migrate:local / db:migrate:remote), which owns the D1 credentials.
 export default defineConfig({
   schema: "./src/db/schema.ts",
   out: "./drizzle",
-  dialect: "postgresql",
-  dbCredentials: {
-    url: process.env.DATABASE_URL!,
-  },
+  dialect: "sqlite",
 });

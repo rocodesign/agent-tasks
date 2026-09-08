@@ -1,7 +1,7 @@
 import { eq, ne, and, asc, desc, lt, max, isNull, inArray } from "drizzle-orm";
-import type { DB } from "./db/client";
-import { machines, sessions, tasks, dismissals } from "./db/schema";
-import { normalizeProvider, sessionRelation } from "./session-metadata";
+import type { DB } from "./db/client.ts";
+import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
+import { normalizeProvider, sessionRelation } from "./session-metadata.ts";
 
 // All data access is account-scoped (multi-tenant). `email` is the authenticated
 // account; machine/session ids are namespaced as `${email}::${rawId}`.

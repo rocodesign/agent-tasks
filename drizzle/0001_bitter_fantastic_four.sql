@@ -1,1 +1,0 @@
-ALTER TABLE "sessions" ADD COLUMN "ended_reason" text;

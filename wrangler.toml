@@ -20,6 +20,13 @@ class_name = "LiveState"
 tag = "v1"
 new_sqlite_classes = ["LiveState"]
 
+# Archive tier. Schema lives in drizzle/; apply with npm run db:migrate:remote.
+[[d1_databases]]
+binding = "DB"
+database_name = "agent-tasks"
+database_id = "80d73b10-696b-4a34-bfb5-28c3d7098120"
+migrations_dir = "drizzle"
+
 # Non-secret config (committed). Override per-env as needed.
 [vars]
 RESEND_FROM = "Fleet <fleet@copaciu.com>"
@@ -34,6 +41,5 @@ not_found_handling = "single-page-application"
 
 # Secrets are NOT stored here.
 #   local dev  -> .dev.vars
-#   production -> wrangler secret put DATABASE_URL
-#                 wrangler secret put RESEND_API_KEY
+#   production -> wrangler secret put RESEND_API_KEY
 #                 wrangler secret put BOOTSTRAP_API_KEY

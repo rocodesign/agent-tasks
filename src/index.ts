@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { LiveState, type Bindings } from "./live-state";
+import { LiveState, type Bindings } from "./live-state.ts";
 
 const app = new Hono<{ Bindings: Bindings }>();
 

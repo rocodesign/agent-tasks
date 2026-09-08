@@ -4,8 +4,8 @@ Agents report the tasks they're working on to a Cloudflare Durable Object; a
 polling dashboard shows the hierarchy **Machine (source) → Session → Tasks**.
 
 - **API + host:** Cloudflare Workers + [Hono]
-- **Live storage:** one SQLite-backed Durable Object; polling and task traffic do not wake Postgres
-- **Archive:** standard Postgres via Drizzle (Neon), flushed hourly and immediately after `SessionEnd`
+- **Live storage:** one SQLite-backed Durable Object; polling and task traffic never reach the archive
+- **Archive:** Cloudflare D1 via Drizzle, flushed hourly and immediately after `SessionEnd`
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
 - **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`), or a JWT from the Sidus shell. Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
 - **Agent integration:** the separate `rococode` plugin reports Claude Code and
@@ -17,14 +17,14 @@ polling dashboard shows the hierarchy **Machine (source) → Session → Tasks**
 src/
   index.ts          Hono adapter: forwards /api to the Durable Object; serves the SPA
   live-state.ts     deep live-state module: auth, tasks, reads, and archive queue
-  store.ts          Postgres archive adapter
+  store.ts          D1 archive adapter
   auth.ts           email OTP, Resend send, API-key mint/hash, allowlist
   shell-jwt.ts      shell JWT verification against the shell JWKS
   db/
     schema.ts       accounts / api_keys / verification / machines / sessions / tasks / dismissals
     client.ts       the ONLY driver touch point (swap to migrate vendors)
 ui/                 Vite + React + Tailwind dashboard -> builds to ui/dist
-drizzle.config.ts   migrations (reads DATABASE_URL from .env)
+drizzle/            SQLite migrations, applied with `wrangler d1 migrations apply`
 ```
 
 ## API
@@ -103,33 +103,31 @@ Optional environment variables:
 npm install
 npm run ui:install
 
-# 2. create the archive tables in Neon (reads .env DATABASE_URL)
-npm run db:generate     # generate SQL migration from schema
-npm run db:migrate      # apply it
-#   or, for quick dev: npm run db:push
+# 2. create the archive tables in the local D1
+npm run db:generate       # generate SQL migration from schema
+npm run db:migrate:local  # apply it to .wrangler local state
 
 # 3. run locally (two terminals)
 npm run dev             # wrangler dev  -> http://localhost:8787  (API)
 npm run ui:dev          # vite          -> http://localhost:5173  (UI, proxies /api)
 ```
 
-Local env lives in `.env` (drizzle migrations: `DATABASE_URL`) and `.dev.vars`
-(worker runtime: `DATABASE_URL`, `RESEND_API_KEY`, `RESEND_FROM`,
-`ALLOWED_EMAILS`, `BOOTSTRAP_API_KEY`, `SHELL_URL`). Both are gitignored.
+Local env lives in `.dev.vars` (worker runtime: `RESEND_API_KEY`, `RESEND_FROM`,
+`ALLOWED_EMAILS`, `BOOTSTRAP_API_KEY`, `SHELL_URL`); it is gitignored. `.env`
+holds `DATABASE_URL` for the one-off Neon export script only.
 `BOOTSTRAP_API_KEY` imports an existing agent key into a fresh Durable Object
-without querying Neon. Set `SHELL_URL` in `.dev.vars` to point at a shell running
+without querying the archive. Set `SHELL_URL` in `.dev.vars` to point at a shell running
 locally; the `wrangler.toml` value points at production.
 
 ## Deploy
 
 ```sh
 # set production secrets once
-npx wrangler secret put DATABASE_URL
 npx wrangler secret put RESEND_API_KEY
 npx wrangler secret put BOOTSTRAP_API_KEY
 # RESEND_FROM, ALLOWED_EMAILS and SHELL_URL are non-secret [vars] in wrangler.toml
 
-# build UI + deploy worker
+# build UI, apply remote D1 migrations, deploy worker
 npm run deploy
 ```
 
@@ -140,5 +138,5 @@ Serves at `fleet.copaciu.com` (and the `*.workers.dev` URL).
 Every accepted mutation is persisted to Durable Object storage before the API
 responds. Repeated `/api/ingest` snapshots for the same session coalesce in the
 archive queue. The first dirty mutation schedules an archive alarm for one hour
-later; `SessionEnd` advances that alarm to run immediately. Failed Neon flushes
+later; `SessionEnd` advances that alarm to run immediately. Failed D1 flushes
 remain queued and retry in one hour, while the live API stays available.
