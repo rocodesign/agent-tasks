@@ -88,16 +88,22 @@ export function systemEvent(
   };
 }
 
-export async function publishEvent(db: DB, input: EventInput): Promise<{ id: number; duplicate: boolean }> {
+// A duplicate returns the stored body as well as the id. A producer whose key is shared by
+// every machine (the deputies all publish as "deputy") settles ownership from that body,
+// and reading it here spares it a scan of the topic looking for its own row.
+export async function publishEvent(
+  db: DB,
+  input: EventInput,
+): Promise<{ id: number; duplicate: boolean; body?: string }> {
   const inserted = await db.insert(events).values(eventRow(input)).onConflictDoNothing().returning({ id: events.id });
   if (inserted[0]) return { id: inserted[0].id, duplicate: false };
   const existing = await db
-    .select({ id: events.id })
+    .select({ id: events.id, body: events.body })
     .from(events)
     .where(and(eq(events.accountEmail, input.accountEmail), eq(events.producer, input.producer), eq(events.eventKey, input.eventKey)))
     .limit(1);
   if (!existing[0]) throw new Error("event insert reported a conflict but no row exists");
-  return { id: existing[0].id, duplicate: true };
+  return { id: existing[0].id, duplicate: true, body: existing[0].body };
 }
 
 // A consumer names every address it answers to in one query: its launch, its session and

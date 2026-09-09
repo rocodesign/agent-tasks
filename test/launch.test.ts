@@ -215,3 +215,15 @@ test("a claim is refused once the assignment is older than the window", async (t
   assert.ok((await assignmentAge(db, EMAIL, LAUNCH))! > CLAIM_WINDOW_MS);
   assert.equal(await assignmentAge(db, EMAIL, "l-20260909-00000000"), null);
 });
+
+test("a duplicate publish returns the row that won, so a claim needs no scan", async (t) => {
+  const { db } = await seeded(t);
+  const common = { accountEmail: EMAIL, project: "bella", type: "launch.claimed", producer: "deputy", eventKey: `${LAUNCH}:claimed`, recipient: LAUNCH, launch: LAUNCH };
+  const first = await publishEvent(db, { ...common, body: JSON.stringify({ machine: "romeo-rtx" }) } as any);
+  const second = await publishEvent(db, { ...common, body: JSON.stringify({ machine: "vps2" }) } as any);
+
+  assert.equal(second.duplicate, true);
+  assert.equal(second.id, first.id);
+  assert.equal(JSON.parse(second.body!).machine, "romeo-rtx");
+  assert.equal(first.body, undefined);
+});
