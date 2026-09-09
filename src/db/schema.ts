@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index, uniqueIndex, primaryKey } from "drizzle-orm/sqlite-core";
 
 // Plain SQLite DDL for Cloudflare D1. Multi-tenant: every row is owned by an
 // account (email). Machine/session ids are surrogate `${email}::${rawId}` so two
@@ -96,6 +96,35 @@ export const sessions = sqliteTable(
   }),
 );
 
+// Append-only stream the orchestrator subscribes to, one per project slug. The id is
+// AUTOINCREMENT so a deleted row never lends its number to a later event: a plain
+// rowid is reused, and a subscriber's cursor would skip past the new row.
+export const events = sqliteTable(
+  "events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    accountEmail: text("account_email")
+      .notNull()
+      .references(() => accounts.email, { onDelete: "cascade" }),
+    project: text("project").notNull(), // slug, the same value the R2 folder uses
+    type: text("type").notNull(),
+    producer: text("producer").notNull(),
+    eventKey: text("event_key").notNull(), // idempotency key, unique per producer
+    sessionId: text("session_id"),
+    delegation: text("delegation"),
+    machineId: text("machine_id"),
+    recipient: text("recipient"),
+    replyTo: integer("reply_to"),
+    body: text("body").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+  },
+  (t) => ({
+    keyIdx: uniqueIndex("events_key_idx").on(t.accountEmail, t.producer, t.eventKey),
+    streamIdx: index("events_stream_idx").on(t.accountEmail, t.project, t.id),
+    createdIdx: index("events_created_idx").on(t.createdAt),
+  }),
+);
+
 export const tasks = sqliteTable(
   "tasks",
   {
@@ -142,4 +171,5 @@ export type ApiKey = typeof apiKeys.$inferSelect;
 export type Machine = typeof machines.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
+export type Event = typeof events.$inferSelect;
 export type Dismissal = typeof dismissals.$inferSelect;

@@ -2,6 +2,7 @@ import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
 import { HISTORY_HIDDEN_KINDS, type SessionFilters } from "./session-filters.ts";
+import { insertEvent, systemEvent } from "./events.ts";
 import { normalizeProvider, pickSessionMeta, sessionRelation, type SessionMeta } from "./session-metadata.ts";
 
 // All data access is account-scoped (multi-tenant). `email` is the authenticated
@@ -253,10 +254,14 @@ export async function completeTask(
     .where(and(eq(sessions.id, id), eq(sessions.accountEmail, email)))
     .limit(1);
   if (!owns.length) return { error: "not_found" };
-  await db
-    .update(tasks)
-    .set({ status: "completed", updatedAt: new Date() })
-    .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, id), eq(tasks.name, taskName)));
+  const subject = await eventSubject(db, email, id);
+  await db.batch([
+    db
+      .update(tasks)
+      .set({ status: "completed", updatedAt: new Date() })
+      .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, id), eq(tasks.name, taskName))),
+    insertEvent(db, systemEvent(subject!, "task.completed", `A follow-up task was completed: ${taskName}`, keyOf(taskName))),
+  ] as any);
   return {};
 }
 
@@ -298,10 +303,15 @@ export async function endSession(
   reason: string = "hook",
 ): Promise<{ error?: string }> {
   const sessionId = `${email}::${rawSessionId}`;
-  await db
-    .update(sessions)
-    .set({ status: "ended", endedReason: reason, updatedAt: new Date() })
-    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)));
+  const subject = await eventSubject(db, email, sessionId);
+  if (!subject) return {};
+  await db.batch([
+    db
+      .update(sessions)
+      .set({ status: "ended", endedReason: reason, updatedAt: new Date() })
+      .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email))),
+    insertEvent(db, systemEvent(subject, "session.ended", `The session ended (${reason}).`)),
+  ] as any);
   return {};
 }
 
@@ -321,10 +331,7 @@ export async function endLatestSession(
     .orderBy(desc(sessions.lastActivityAt))
     .limit(1);
   if (!rows.length) return { ended: null };
-  await db
-    .update(sessions)
-    .set({ status: "ended", endedReason: reason, updatedAt: new Date() })
-    .where(eq(sessions.id, rows[0].id));
+  await endSession(db, email, stripAccountPrefix(email, rows[0].id), reason);
   return { ended: rows[0].id };
 }
 
@@ -371,6 +378,39 @@ export async function purgeOldEndedSessions(db: DB): Promise<{ removed: number }
 // Early title from the first-prompt hook: fires while the session is still running,
 // so a live card gets a real name within seconds of the opening message. Never
 // outranks a digest — once enrichment has run, the transcript-derived title wins.
+
+export type EventSubject = {
+  id: string;
+  accountEmail: string;
+  project: string | null;
+  projectKey: string | null;
+  delegation: string | null;
+  machineId: string | null;
+};
+
+async function eventSubject(db: DB, email: string, sessionId: string): Promise<EventSubject | null> {
+  const rows = await db
+    .select({
+      id: sessions.id,
+      accountEmail: sessions.accountEmail,
+      project: sessions.project,
+      projectKey: sessions.projectKey,
+      delegation: sessions.delegation,
+      machineId: sessions.machineId,
+    })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+// Short, stable discriminator so a repeated report is one event, not many.
+function keyOf(value: string): string {
+  let hash = 5381;
+  for (let index = 0; index < value.length; index += 1) hash = ((hash << 5) + hash + value.charCodeAt(index)) >>> 0;
+  return hash.toString(36);
+}
+
 export async function titleSession(
   db: DB,
   email: string,
@@ -381,12 +421,15 @@ export async function titleSession(
   if (!rawSessionId || !title) return { error: "sessionId and title required" };
   const sessionId = `${email}::${rawSessionId}`;
 
+  const subject = await eventSubject(db, email, sessionId);
+  if (!subject) return { error: "not_found" };
   const updated = await db
     .update(sessions)
     .set({ title, updatedAt: new Date() })
     .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email), isNull(sessions.summarizedAt)))
     .returning({ id: sessions.id });
   if (!updated.length) return { error: "not_found" };
+  await insertEvent(db, systemEvent(subject, "session.titled", title, keyOf(title)));
   return { titled: sessionId };
 }
 
@@ -439,6 +482,11 @@ export async function enrichSession(
     const ops: any[] = [db.delete(tasks).where(and(eq(tasks.sessionId, sessionId), eq(tasks.source, "generated")))];
     if (rows.length) ops.push(db.insert(tasks).values(rows));
     await db.batch(ops as any);
+  }
+  const subject = await eventSubject(db, email, sessionId);
+  if (subject) {
+    const digest = String(body?.summary ?? body?.title ?? "The session was summarized.");
+    await insertEvent(db, systemEvent(subject, "session.summarized", digest, String(now.getTime())));
   }
   return { enriched: sessionId };
 }
@@ -519,11 +567,19 @@ export async function startSession(
       },
     });
 
+  const subject = await eventSubject(db, email, sessionId);
+  if (subject) {
+    await insertEvent(db, systemEvent(subject, "session.started", p.title || "A session started."));
+  }
   return { machineId, sessionId };
 }
 
 // Permanently remove a session (and, via FK cascade, its tasks + dismissals).
 // `fullSessionId` is the namespaced `${email}::${rawId}` as shown in the tree.
+function stripAccountPrefix(email: string, id: string): string {
+  return id.startsWith(`${email}::`) ? id.slice(email.length + 2) : id;
+}
+
 export async function removeSession(db: DB, email: string, fullSessionId: string): Promise<{ error?: string }> {
   await db.delete(sessions).where(and(eq(sessions.id, fullSessionId), eq(sessions.accountEmail, email)));
   return {};

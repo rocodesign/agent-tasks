@@ -33,6 +33,7 @@ import {
 } from "./auth.ts";
 import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt.ts";
 import { deleteSessionKnowledge, writeSessionKnowledge } from "./knowledge.ts";
+import { purgeOldEvents } from "./events.ts";
 import {
   matchesMachineFilter,
   matchesSessionFilters,
@@ -389,6 +390,7 @@ export class LiveState {
       const db = createDb(this.env.DB);
       reaped = (await reapStaleSessions(db)).ended;
       purged = (await purgeOldEndedSessions(db)).removed;
+      await purgeOldEvents(db);
     } catch (error) {
       // Postgres maintenance is retried by the next cron; live pruning already ran.
       console.error("[maintenance] postgres pass failed", error);
