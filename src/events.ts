@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNull, lt, or, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNotNull, isNull, lt, or, type SQL } from "drizzle-orm";
 import type { DB } from "./db/client.ts";
 import { events } from "./db/schema.ts";
 import { projectSlug } from "./knowledge.ts";
@@ -199,6 +199,16 @@ export async function purgeOldEvents(db: DB): Promise<{ removed: number }> {
   const cutoff = new Date(Date.now() - EVENT_RETENTION_MS);
   const rows = await db.delete(events).where(lt(events.createdAt, cutoff)).returning({ id: events.id });
   return { removed: rows.length };
+}
+
+// Read before the events go: a launch prompt lives in R2 and the event stream is the only
+// record of which launches a project ever started.
+export async function launchIdsForProject(db: DB, email: string, project: string): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ launch: events.launch })
+    .from(events)
+    .where(and(eq(events.accountEmail, email), eq(events.project, project), isNotNull(events.launch)));
+  return rows.map((row) => row.launch).filter((id): id is string => Boolean(id));
 }
 
 export async function purgeProjectEvents(db: DB, email: string, project: string): Promise<{ removed: number }> {

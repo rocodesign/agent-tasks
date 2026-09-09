@@ -1,8 +1,9 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
 import { isAllowedEmail, type AuthEnv } from "./auth.ts";
 
 export type ShellJwtEnv = AuthEnv & {
   SHELL_URL?: string;
+  SHELL?: Fetcher;
 };
 
 export type ShellJwtClaims = {
@@ -26,11 +27,19 @@ export function shellIssuer(env: ShellJwtEnv): string | null {
 // the isolate is what keeps verification from calling the shell on every poll.
 const keySets = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
-function keySetFor(issuer: string): ReturnType<typeof createRemoteJWKSet> {
-  let keySet = keySets.get(issuer);
+// The key fetch goes over the binding for the same reason introspection does: a call that
+// arrived through the shell cannot reach the shell's hostname over HTTP, and a JWKS that
+// never arrives fails every token rather than reporting an error.
+function keySetFor(env: ShellJwtEnv, issuer: string): ReturnType<typeof createRemoteJWKSet> {
+  const shell = env.SHELL;
+  const cacheKey = shell ? `${issuer}#binding` : issuer;
+  let keySet = keySets.get(cacheKey);
   if (!keySet) {
-    keySet = createRemoteJWKSet(new URL(`${issuer}/api/auth/jwks`));
-    keySets.set(issuer, keySet);
+    const url = new URL(`${issuer}/api/auth/jwks`);
+    keySet = shell
+      ? createRemoteJWKSet(url, { [customFetch]: (resource, options) => shell.fetch(new Request(resource, options)) })
+      : createRemoteJWKSet(url);
+    keySets.set(cacheKey, keySet);
   }
   return keySet;
 }
@@ -39,7 +48,7 @@ export async function verifyShellJwt(env: ShellJwtEnv, token: string): Promise<S
   const issuer = shellIssuer(env);
   if (!issuer || !looksLikeJwt(token)) return null;
   try {
-    const { payload } = await jwtVerify(token, keySetFor(issuer), {
+    const { payload } = await jwtVerify(token, keySetFor(env, issuer), {
       issuer,
       algorithms: ["EdDSA", "Ed25519", "ES256"],
     });

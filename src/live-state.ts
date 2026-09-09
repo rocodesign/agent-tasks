@@ -9,7 +9,9 @@ import {
   titleSession,
   ingestSnapshot,
   listHistorySessions,
+  namespaced,
   purgeOldEndedSessions,
+  purgeProject,
   reapStaleSessions,
   removeSession,
   startSession,
@@ -32,7 +34,7 @@ import {
   sha256Hex,
 } from "./auth.ts";
 import { hasScope, resolveIdentity } from "./identity.ts";
-import { deleteSessionKnowledge, writeSessionKnowledge } from "./knowledge.ts";
+import { deleteSessionKnowledge, projectSlug, writeSessionKnowledge } from "./knowledge.ts";
 import { purgeOldEvents } from "./events.ts";
 import {
   matchesMachineFilter,
@@ -275,7 +277,52 @@ export class LiveState {
       await this.changed(state);
       return json({ ok: true });
     }
+    if (path === "/api/project/purge" && request.method === "POST") {
+      return this.purgeProject(request, state, email);
+    }
     return json({ error: "not_found" }, 404);
+  }
+
+  // A drop removes what cannot be rebuilt, so it needs the orchestrate scope rather than
+  // the publish scope every other write here takes, and the caller repeats the slug.
+  private async purgeProject(request: Request, state: DurableState, email: string): Promise<Response> {
+    const identity = await resolveIdentity(this.env, (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, ""));
+    if (!identity || !hasScope(identity, "orchestrate")) {
+      return json({ error: "this call needs the fleet orchestrate scope" }, 403);
+    }
+    const body: any = await request.json().catch(() => ({}));
+    const slug = String(body?.project ?? "").trim();
+    if (!slug) return json({ error: "project required" }, 400);
+    if (String(body?.confirm ?? "") !== slug) {
+      return json({ error: "repeat the project in confirm to purge it" }, 400);
+    }
+
+    let result;
+    try {
+      result = await purgeProject(createDb(this.env.DB), this.env.KNOWLEDGE, email, slug);
+    } catch (error) {
+      return json({ error: "purge_failed", detail: String(error) }, 500);
+    }
+
+    const account = ensureAccount(state, email);
+    let live = 0;
+    for (const machine of Object.values(account.machines)) {
+      for (const session of Object.values(machine.sessions)) {
+        if (projectSlug(session.projectKey ?? null, session.project) !== slug) continue;
+        removeLive(account, session.id);
+        removeQueuedSessionEvents(state, email, session.id);
+        live += 1;
+      }
+    }
+    // A queued archive write would resurrect a purged session on the next flush.
+    for (const [id, event] of Object.entries(state.archive)) {
+      if (event.email === email && result.sessions.includes(namespaced(email, String(event.body?.sessionId ?? event.body?.session?.id ?? "")))) {
+        delete state.archive[id];
+      }
+    }
+    account.version = Date.now();
+    await this.changed(state);
+    return json({ ...result, sessions: result.sessions.length, live });
   }
 
   // Durable session history for the orchestrator: summarized sessions from D1, newest

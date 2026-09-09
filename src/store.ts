@@ -2,7 +2,9 @@ import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
 import { HISTORY_HIDDEN_KINDS, type SessionFilters } from "./session-filters.ts";
-import { insertEvent, systemEvent } from "./events.ts";
+import { insertEvent, launchIdsForProject, purgeProjectEvents, systemEvent } from "./events.ts";
+import { projectSlug } from "./knowledge.ts";
+import { launchPromptKey } from "./launch.ts";
 import { normalizeProvider, pickSessionMeta, sessionRelation, type SessionMeta } from "./session-metadata.ts";
 
 // All data access is account-scoped (multi-tenant). `email` is the authenticated
@@ -654,4 +656,56 @@ export function sessionName(seed: string): string {
 
 function rankStatus(status: string): number {
   return status === "ended" ? 1 : 0;
+}
+
+// Dropping a project is irreversible by design: every session it produced, the follow-ups
+// and dismissals hanging off them, its event stream, its knowledge documents and the
+// prompts of the launches it recorded. The slug is derived from the cwd, so the rows are
+// matched in memory rather than by a LIKE that would also catch a similarly named path.
+export async function purgeProject(
+  db: DB,
+  bucket: R2Bucket,
+  email: string,
+  slug: string,
+): Promise<{ slug: string; sessions: string[]; events: number; objects: number }> {
+  const candidates = await db
+    .select({ id: sessions.id, project: sessions.project, projectKey: sessions.projectKey })
+    .from(sessions)
+    .where(eq(sessions.accountEmail, email));
+  const doomed = candidates.filter((row) => projectSlug(row.projectKey, row.project) === slug).map((row) => row.id);
+
+  const launches = await launchIdsForProject(db, email, slug);
+  const { removed } = await purgeProjectEvents(db, email, slug);
+
+  for (const batch of chunk(doomed, 50)) {
+    // D1 does not enforce the cascade, so the children go first: an orphaned task would
+    // keep the follow-up visible in every brief.
+    await db.delete(tasks).where(and(eq(tasks.accountEmail, email), inArray(tasks.sessionId, batch)));
+    await db.delete(dismissals).where(and(eq(dismissals.accountEmail, email), inArray(dismissals.sessionId, batch)));
+    await db.delete(sessions).where(and(eq(sessions.accountEmail, email), inArray(sessions.id, batch)));
+  }
+
+  let objects = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix: `sessions/${slug}/`, cursor });
+    for (const object of page.objects) {
+      await bucket.delete(object.key);
+      objects += 1;
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  for (const launchId of launches) {
+    await bucket.delete(launchPromptKey(launchId));
+    objects += 1;
+  }
+
+  return { slug, sessions: doomed, events: removed, objects };
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let index = 0; index < items.length; index += size) batches.push(items.slice(index, index + size));
+  return batches;
 }
