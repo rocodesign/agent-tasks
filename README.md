@@ -8,7 +8,7 @@ polling dashboard shows the hierarchy **Machine (source) → Session → Tasks**
 - **Archive:** Cloudflare D1 via Drizzle, flushed hourly and immediately after `SessionEnd`
 - **Knowledge:** each enriched session is written to R2 (`majordomo-knowledge`) as `sessions/<slug>/<sessionId>.md` for AI Search
 - **UI:** Vite + React + Tailwind static build, served by the Worker; polls for updates
-- **Auth:** email OTP login → a per-account API key (`Authorization: Bearer <key>`), or a JWT from the Sidus shell. Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
+- **Auth:** a JWT from the Sidus shell for a person, or a service token (`st_…`) for a machine, both as `Authorization: Bearer <token>`. Allowlist-gated. Data is **multi-tenant**: each account sees only its own machines/sessions/tasks.
 - **Agent integration:** the separate `rococode` plugin reports Claude Code and
   Codex lifecycle/task events to this API through silent deterministic hooks.
 
@@ -48,10 +48,13 @@ drizzle/            SQLite migrations, applied with `wrangler d1 migrations appl
 | GET | `/health` | no | Health check |
 | GET | `*` | no | Static SPA |
 
-**Auth model:** sign in at `/` with your email → a 6-digit OTP (sent via Resend) →
-the app mints an API key tied to your email and stores it in the browser. Click
-**agent key** in the top bar to copy it into `AGENT_TASKS_KEY`. Hooks and
-the UI both authenticate with that key; all data is scoped to the account.
+**Auth model:** the worker has no public hostname. A person reaches it at
+`https://sidus.copaciu.com/fleet`, where the shell holds the session and forwards a
+short-lived JWT. A machine carries a service token minted in the shell under
+**Settings → Machines**, placed in `AGENT_TASKS_KEY`. All data is scoped to the account.
+
+The `/api/auth/*` routes, the `api_keys` table and the bundled SPA are the path that
+came before the shell. They are unreachable while the worker has no route.
 
 ## Shell JWT
 
@@ -135,8 +138,8 @@ npx wrangler secret put BOOTSTRAP_API_KEY
 npm run deploy
 ```
 
-Serves at `sidus.copaciu.com/api/fleet`, through the shell (and at the `*.workers.dev`
-URL). The worker has no custom domain of its own.
+Serves only at `sidus.copaciu.com/api/fleet`, through the shell. `workers_dev` is off
+and no route is bound, so the service binding is the single way in.
 
 ### Grant the orchestrate scope
 

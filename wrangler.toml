@@ -2,7 +2,9 @@ name = "agent-tasks"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
-workers_dev = true
+# No public hostname and no route. Every caller arrives through the shell at
+# https://sidus.copaciu.com/api/fleet, which dispatches over its service binding.
+workers_dev = false
 
 # Maintenance: reap silent sessions, prune live state, flush the archive queue.
 [triggers]
