@@ -12,7 +12,7 @@ const NEGATIVE_TTL_MS = 60_000;
 const MAX_TTL_MS = 60 * 60_000;
 const INTROSPECT_TIMEOUT_MS = 4000;
 
-export type IdentityEnv = ShellJwtEnv & { DB: D1Database };
+export type IdentityEnv = ShellJwtEnv & { DB: D1Database; SHELL?: Fetcher };
 
 export type Identity = {
   email: string;
@@ -57,12 +57,15 @@ async function introspect(env: IdentityEnv, token: string): Promise<Identity | n
   let identity: Identity | null = null;
   let ttl = NEGATIVE_TTL_MS;
   try {
-    const response = await fetch(`${issuer}/api/service/introspect`, {
+    const request = new Request(`${issuer}/api/service/introspect`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ token }),
       signal: AbortSignal.timeout(INTROSPECT_TIMEOUT_MS),
     });
+    // The binding dispatches worker to worker. Plain fetch is the fallback for a
+    // deployment without it, and it fails whenever the caller arrived through the shell.
+    const response = env.SHELL ? await env.SHELL.fetch(request) : await fetch(request);
     if (response.status === 401) {
       introspections.set(cacheKey, { identity: null, expires: Date.now() + NEGATIVE_TTL_MS });
       return null;

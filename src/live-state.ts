@@ -49,6 +49,7 @@ export type Bindings = {
   ALLOWED_EMAILS?: string;
   BOOTSTRAP_API_KEY?: string;
   SHELL_URL?: string;
+  SHELL?: Fetcher;
   AI: Ai;
   AI_SEARCH?: string;
   LIVE_STATE: DurableObjectNamespace;

@@ -27,6 +27,12 @@ database_name = "agent-tasks"
 database_id = "80d73b10-696b-4a34-bfb5-28c3d7098120"
 migrations_dir = "drizzle"
 
+# The shell is the token issuer. Introspection goes over the binding, not the public
+# hostname: a call arriving through the shell cannot reach back out to it over HTTP.
+[[services]]
+binding = "SHELL"
+service = "sidus-shell"
+
 # Workers AI binding, used only to reach the AI Search instance named in AI_SEARCH.
 [ai]
 binding = "AI"
