@@ -5,6 +5,8 @@ import { resolveKey, resolveKeyEmail, runSearch } from "./search.ts";
 import { createDb } from "./db/client.ts";
 import {
   ASSIGNMENT_PRODUCER,
+  assignmentAge,
+  CLAIM_WINDOW_MS,
   DEPUTY_TYPES,
   listEvents,
   MAX_BODY,
@@ -58,8 +60,16 @@ app.post("/api/events", async (c) => {
   if (producer === ASSIGNMENT_PRODUCER) return c.json({ error: `producer ${ASSIGNMENT_PRODUCER} is reserved` }, 403);
   if (text.length > MAX_BODY) return c.json({ error: "body too large" }, 413);
   if (/```/.test(text)) return c.json({ error: "the stream carries prose, not code" }, 400);
+  const db = createDb(c.env.DB);
+  // A claim is answered against this clock, not the machine's: a deputy that was offline
+  // for a day would otherwise read its own stale time and start reassigned work.
+  if (type === "launch.claimed") {
+    const age = await assignmentAge(db, key.email, String(body?.launch ?? ""));
+    if (age === null) return c.json({ error: "no such assignment" }, 404);
+    if (age > CLAIM_WINDOW_MS) return c.json({ error: "the assignment expired" }, 409);
+  }
   try {
-    const result = await publishEvent(createDb(c.env.DB), {
+    const result = await publishEvent(db, {
       accountEmail: key.email,
       project,
       type,

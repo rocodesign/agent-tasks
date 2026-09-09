@@ -20,6 +20,11 @@ export const ASSIGNMENT_PRODUCER = "orchestrator";
 export const ORCHESTRATOR_TYPES = ["launch.cancelled"] as const;
 export const DEPUTY_TYPES = ["launch.claimed", "launch.started", "launch.failed"] as const;
 
+// A machine that was offline for a day must not start work that was reassigned while it
+// was away, and its own clock cannot decide that: Fleet answers with the server's clock
+// when the claim arrives.
+export const CLAIM_WINDOW_MS = 6 * 3_600_000;
+
 export const MAX_BODY = 2048;
 export const EVENT_RETENTION_MS = 30 * 24 * 3_600_000;
 // Each recipient is one bound parameter and D1 allows 100 per query.
@@ -168,6 +173,12 @@ export async function findAssignment(db: DB, email: string, launch: string) {
     .where(and(eq(events.accountEmail, email), eq(events.launch, launch), eq(events.type, ASSIGNMENT_TYPE)))
     .limit(1);
   return rows[0] ?? null;
+}
+
+export async function assignmentAge(db: DB, email: string, launch: string): Promise<number | null> {
+  const assignment = await findAssignment(db, email, launch);
+  if (!assignment?.createdAt) return null;
+  return Date.now() - assignment.createdAt.getTime();
 }
 
 export async function insertAssignment(db: DB, input: EventInput): Promise<{ id: number; duplicate: boolean }> {

@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accounts } from "../src/db/schema.ts";
-import { ASSIGNMENT_TYPE, DEPUTY_TYPES, listEvents, ORCHESTRATOR_TYPES, POST_TYPES, publishEvent } from "../src/events.ts";
+import { eq } from "drizzle-orm";
+import { accounts, events } from "../src/db/schema.ts";
+import {
+  ASSIGNMENT_TYPE,
+  assignmentAge,
+  CLAIM_WINDOW_MS,
+  DEPUTY_TYPES,
+  listEvents,
+  ORCHESTRATOR_TYPES,
+  POST_TYPES,
+  publishEvent,
+} from "../src/events.ts";
 import {
   assignLaunch,
   LaunchConflict,
@@ -195,4 +205,13 @@ test("a project filter cannot hide a message addressed to the consumer", async (
     () => listEvents(db, EMAIL, { project: "bella", recipients: ["box"] }),
     /cannot also filter by project/,
   );
+});
+
+test("a claim is refused once the assignment is older than the window", async (t) => {
+  const { db, r2 } = await seeded(t);
+  await assignLaunch(db, r2, EMAIL, assignment());
+  assert.ok((await assignmentAge(db, EMAIL, LAUNCH))! < 60_000);
+  await db.update(events).set({ createdAt: new Date(Date.now() - 7 * 3_600_000) }).where(eq(events.launch, LAUNCH));
+  assert.ok((await assignmentAge(db, EMAIL, LAUNCH))! > CLAIM_WINDOW_MS);
+  assert.equal(await assignmentAge(db, EMAIL, "l-20260909-00000000"), null);
 });
