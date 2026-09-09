@@ -83,11 +83,11 @@ The cross-agent reporter is distributed by the `rococode` plugin rather than thi
 service repository. Expose the API key to Claude Code and Codex:
 
 ```sh
-export AGENT_TASKS_KEY="<agent key copied from the dashboard>"
-export AGENT_TASKS_URL="https://fleet.copaciu.com" # optional; this is the default
+export AGENT_TASKS_KEY="<service token minted on the shell Machines page>"
+export AGENT_TASKS_URL="https://sidus.copaciu.com/api/fleet" # optional; this is the default
 ```
 
-The reporter calls `/api/session/start`, `/api/ingest`, and `/api/session/end`.
+The reporter calls `/session/start`, `/ingest`, and `/session/end` under that base URL.
 It registers no MCP server, model-facing tool, skill, or instructions, so reporting
 consumes zero model tokens.
 
@@ -135,21 +135,22 @@ npx wrangler secret put BOOTSTRAP_API_KEY
 npm run deploy
 ```
 
-Serves at `fleet.copaciu.com` (and the `*.workers.dev` URL).
+Serves at `sidus.copaciu.com/api/fleet`, through the shell (and at the `*.workers.dev`
+URL). The worker has no custom domain of its own.
 
-### Grant the orchestrator role
+### Grant the orchestrate scope
 
-`POST /api/launch` and `launch.cancelled` need a key whose `api_keys.role` is
-`orchestrator`. Every existing key has a null role and cannot assign work, so grant it
-once, to Majordomo's key only:
+`POST /api/launch` and `launch.cancelled` need the `orchestrate` scope. Mint the token on
+the shell Machines page and select `orchestrate` there, for Majordomo's machine only. A
+token without it can still read and post, but cannot start work on a machine.
+
+Legacy `at_` keys carry an `api_keys.role` column instead. `orchestrator` is the role that
+matches the scope:
 
 ```sh
 npx wrangler d1 execute agent-tasks --remote \
   --command "UPDATE api_keys SET role = 'orchestrator' WHERE prefix = '<the key prefix>'"
 ```
-
-Check it with `SELECT prefix, role FROM api_keys` before assigning any work. Any other key
-holder can still read and post, but cannot start work on a machine.
 
 ## One-off Neon import
 
