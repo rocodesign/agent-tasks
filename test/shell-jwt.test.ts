@@ -66,13 +66,13 @@ test("reads the issuer from SHELL_URL and drops a trailing slash", () => {
 test("verifies an ES256 token against the shell JWKS", async () => {
   const { env, sign } = await harness("ES256");
   const token = await sign({ sub: "user_1", email: ALLOWED });
-  assert.deepEqual(await verifyShellJwt(env, token), { sub: "user_1", email: ALLOWED });
+  assert.deepEqual(await verifyShellJwt(env, token), { sub: "user_1", email: ALLOWED, grants: null });
 });
 
 test("verifies an EdDSA token against the shell JWKS", async () => {
   const { env, sign } = await harness("EdDSA");
   const token = await sign({ sub: "user_2", email: ALLOWED });
-  assert.deepEqual(await verifyShellJwt(env, token), { sub: "user_2", email: ALLOWED });
+  assert.deepEqual(await verifyShellJwt(env, token), { sub: "user_2", email: ALLOWED, grants: null });
 });
 
 test("accepts a token without an audience claim", async () => {

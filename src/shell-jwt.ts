@@ -8,6 +8,7 @@ export type ShellJwtEnv = AuthEnv & {
 export type ShellJwtClaims = {
   sub: string;
   email: string;
+  grants: unknown;
 };
 
 const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
@@ -45,7 +46,7 @@ export async function verifyShellJwt(env: ShellJwtEnv, token: string): Promise<S
     const sub = typeof payload.sub === "string" ? payload.sub.trim() : "";
     const email = typeof payload.email === "string" ? payload.email.trim() : "";
     if (!sub || !email) return null;
-    return { sub, email };
+    return { sub, email, grants: payload.grants ?? null };
   } catch {
     return null;
   }

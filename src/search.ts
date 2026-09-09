@@ -26,7 +26,7 @@ export function buildFilters(request: SearchRequest): Comparison | { type: "and"
   return clauses.length === 1 ? clauses[0] : { type: "and", filters: clauses };
 }
 
-export async function resolveKey(env: SearchEnv, token: string): Promise<{ email: string; role: string | null } | null> {
+export async function resolveKey(env: { DB: D1Database }, token: string): Promise<{ email: string; role: string | null } | null> {
   if (!token) return null;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -38,7 +38,7 @@ export async function resolveKey(env: SearchEnv, token: string): Promise<{ email
   return rows[0] ? { email: rows[0].email, role: rows[0].role ?? null } : null;
 }
 
-export async function resolveKeyEmail(env: SearchEnv, token: string): Promise<string | null> {
+export async function resolveKeyEmail(env: { DB: D1Database }, token: string): Promise<string | null> {
   return (await resolveKey(env, token))?.email ?? null;
 }
 

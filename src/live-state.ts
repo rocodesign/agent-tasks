@@ -31,7 +31,7 @@ import {
   sendOtpEmail,
   sha256Hex,
 } from "./auth.ts";
-import { looksLikeJwt, resolveShellAccountEmail } from "./shell-jwt.ts";
+import { hasScope, resolveIdentity } from "./identity.ts";
 import { deleteSessionKnowledge, writeSessionKnowledge } from "./knowledge.ts";
 import { purgeOldEvents } from "./events.ts";
 import {
@@ -350,19 +350,11 @@ export class LiveState {
     return json({ ok: true, email, apiKey });
   }
 
+  // A GET reads the live tree and a POST writes to it, so the two fleet scopes map
+  // straight onto the method. Keys minted here predate scopes and carry both.
   private async resolveEmail(request: Request, state: DurableState): Promise<string | null> {
     const token = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     if (!token) return null;
-
-    if (looksLikeJwt(token)) {
-      const email = await resolveShellAccountEmail(this.env, token);
-      if (!email) return null;
-      if (!state.accounts[email]) {
-        ensureAccount(state, email);
-        await this.persist(state);
-      }
-      return email;
-    }
 
     const hash = await sha256Hex(token);
     const known = state.keys[hash];
@@ -376,7 +368,15 @@ export class LiveState {
       await this.persist(state);
       return email;
     }
-    return null;
+
+    const identity = await resolveIdentity(this.env, token);
+    if (!identity) return null;
+    if (!hasScope(identity, request.method === "GET" ? "read" : "publish")) return null;
+    if (!state.accounts[identity.email]) {
+      ensureAccount(state, identity.email);
+      await this.persist(state);
+    }
+    return identity.email;
   }
 
   // Scheduled maintenance: reap silent sessions and prune the live tree. Codex (and
