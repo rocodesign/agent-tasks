@@ -42,3 +42,11 @@ test("matches a machine by hostname, raw id or namespaced id", () => {
   assert.equal(matchesMachineFilter(machine, "romeo@example.com", "BOX-1"), true);
   assert.equal(matchesMachineFilter(machine, "romeo@example.com", "other"), false);
 });
+
+test("a comma separated kind matches any listed kind", () => {
+  const filters = { ...NO_FILTERS, kind: "interactive,delegated" };
+  assert.equal(matchesSessionFilters({ kind: "delegated" }, filters), true);
+  assert.equal(matchesSessionFilters({ kind: "interactive" }, filters), true);
+  assert.equal(matchesSessionFilters({ kind: "worker" }, filters), false);
+  assert.equal(matchesSessionFilters({ kind: null }, filters), false);
+});

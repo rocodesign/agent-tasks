@@ -172,7 +172,10 @@ export async function listHistorySessions(
       or(eq(sessions.projectKey, params.project), and(isNull(sessions.projectKey), eq(sessions.project, params.project)))!,
     );
   }
-  if (params.kind) conditions.push(eq(sessions.kind, params.kind));
+  if (params.kind) {
+    const kinds = params.kind.split(",").map((entry) => entry.trim()).filter(Boolean);
+    conditions.push(kinds.length === 1 ? eq(sessions.kind, kinds[0]) : inArray(sessions.kind, kinds));
+  }
   else conditions.push(or(isNull(sessions.kind), notInArray(sessions.kind, HISTORY_HIDDEN_KINDS))!);
   if (params.delegation) conditions.push(eq(sessions.delegation, params.delegation));
   if (params.machine) {
@@ -204,10 +207,15 @@ export async function listHistorySessions(
   if (!rows.length) return [];
 
   const ids = rows.map((row) => row.id);
-  const generated = await db
-    .select()
-    .from(tasks)
-    .where(and(eq(tasks.accountEmail, email), eq(tasks.source, "generated"), inArray(tasks.sessionId, ids)));
+  // D1 allows 100 bound variables per statement, and each id is one of them.
+  const generated: (typeof tasks.$inferSelect)[] = [];
+  for (let start = 0; start < ids.length; start += 80) {
+    const batch = await db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.accountEmail, email), eq(tasks.source, "generated"), inArray(tasks.sessionId, ids.slice(start, start + 80))));
+    generated.push(...batch);
+  }
   const bySession = groupBy(generated, (task) => task.sessionId);
   return rows.map((row) => ({ ...row, generatedTasks: bySession.get(row.id) ?? [] }));
 }

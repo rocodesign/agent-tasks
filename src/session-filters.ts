@@ -7,6 +7,7 @@ export type SessionFilters = {
 
 // Automated sessions are noise in a history read: subagents fold into their parent and
 // scheduled sweeps are never summarized. An explicit ?kind= still returns them.
+// A ?kind= may list several kinds, comma separated.
 export const HISTORY_HIDDEN_KINDS = ["subagent", "scheduled"];
 
 export function readSessionFilters(url: URL): SessionFilters {
@@ -31,7 +32,7 @@ export function matchesSessionFilters(
   filters: SessionFilters,
 ): boolean {
   if (filters.project && !matchesProject(session, filters.project)) return false;
-  if (filters.kind && session.kind !== filters.kind) return false;
+  if (filters.kind && !filters.kind.split(",").includes(session.kind ?? "")) return false;
   if (filters.delegation && session.delegation !== filters.delegation) return false;
   return true;
 }
