@@ -39,6 +39,7 @@ import { purgeOldEvents } from "./events.ts";
 import {
   matchesMachineFilter,
   matchesSessionFilters,
+  reachableSession,
   readSessionFilters,
   type SessionFilters,
 } from "./session-filters.ts";
@@ -156,18 +157,29 @@ export class LiveState {
       return this.maintenance(state);
     }
 
-    const email = await this.resolveEmail(request, state);
-    if (!email) return json({ error: "unauthorized" }, 401);
+    const actor = await this.resolveActor(request, state);
+    if (!actor) return json({ error: "unauthorized" }, 401);
+    const { email, projects } = actor;
     const account = ensureAccount(state, email);
+
+    // Every path below either names a project or names a session that has one. A
+    // credential scoped to a list of projects must not read or change anything else.
+    const reaches = (session: { projectKey?: string | null; project?: string | null } | undefined | null) =>
+      projects === null || (session ? reachableSession(session, projects) : false);
+    const denied = () => json({ error: "this credential cannot reach that project" }, 403);
+    const bodySession = (body: any) =>
+      findSession(account, String(body?.sessionId ?? body?.session?.id ?? "")) ??
+      findSession(account, namespaced(email, String(body?.sessionId ?? body?.session?.id ?? "")));
 
     if (path === "/api/version" && request.method === "GET") {
       return json({ version: account.version });
     }
     if (path === "/api/tree" && request.method === "GET") {
-      return json({ machines: buildLiveTree(account, email, readSessionFilters(url)) });
+      return json({ machines: buildLiveTree(account, email, readSessionFilters(url), projects) });
     }
     if (path === "/api/ingest" && request.method === "POST") {
       const body: any = await request.json().catch(() => null);
+      if (!reaches(body?.session)) return denied();
       const result = ingestLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
       queue(state, {
@@ -181,6 +193,7 @@ export class LiveState {
     }
     if (path === "/api/session/start" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
+      if (!reaches(body)) return denied();
       const result = startLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
       queue(state, { id: `start:${email}:${result.sessionId}`, kind: "start", email, body });
@@ -189,6 +202,7 @@ export class LiveState {
     }
     if (path === "/api/session/end" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
+      if (projects !== null && !reaches(bodySession(body))) return denied();
       const result = endLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
       queue(state, {
@@ -203,6 +217,7 @@ export class LiveState {
     }
     if (path === "/api/session/title" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
+      if (projects !== null && !reaches(bodySession(body))) return denied();
       const result = titleLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
       queue(state, {
@@ -216,6 +231,7 @@ export class LiveState {
     }
     if (path === "/api/session/enrich" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
+      if (projects !== null && !reaches(bodySession(body))) return denied();
       const result = enrichLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
       queue(state, {
@@ -231,10 +247,11 @@ export class LiveState {
       return json({ ok: true, ...result });
     }
     if (path === "/api/history/sessions" && request.method === "GET") {
-      return this.historySessions(url, email);
+      return this.historySessions(url, email, projects);
     }
     if (path === "/api/dismiss" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
+      if (projects !== null && !reaches(bodySession(body))) return denied();
       const result = dismissLive(account, body);
       if ("error" in result) return json({ error: result.error }, 404);
       queue(state, {
@@ -248,6 +265,7 @@ export class LiveState {
     }
     if (path === "/api/task/complete" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
+      if (projects !== null && !reaches(bodySession(body))) return denied();
       const result = completeLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
       queue(state, {
@@ -263,6 +281,7 @@ export class LiveState {
       const sessionId = url.searchParams.get("sessionId");
       if (!sessionId) return json({ error: "sessionId required" }, 400);
       const session = findSession(account, sessionId);
+      if (projects !== null && !reaches(session)) return denied();
       return json({
         dismissed: session?.tasks.filter((task) => task.status === "deferred").map((task) => task.name) ?? [],
       });
@@ -271,6 +290,7 @@ export class LiveState {
       const body: any = await request.json().catch(() => ({}));
       const sessionId = String(body?.sessionId ?? "");
       if (!sessionId) return json({ error: "sessionId required" }, 400);
+      if (projects !== null && !reaches(bodySession(body))) return denied();
       removeLive(account, sessionId);
       removeQueuedSessionEvents(state, email, sessionId);
       queue(state, { id: `remove:${email}:${sessionId}`, kind: "remove", email, body });
@@ -328,7 +348,7 @@ export class LiveState {
   // Durable session history for the orchestrator: summarized sessions from D1, newest
   // first, with their generated follow-up tasks. Filters: ?project=, ?kind=, ?delegation=,
   // ?machine=, ?since= (ISO date), ?all=1 (include unsummarized), ?limit= (default 50, max 500).
-  private async historySessions(url: URL, email: string): Promise<Response> {
+  private async historySessions(url: URL, email: string, projects: string[] | null): Promise<Response> {
     try {
       const rows = await listHistorySessions(createDb(this.env.DB), email, {
         ...readSessionFilters(url),
@@ -336,7 +356,10 @@ export class LiveState {
         all: url.searchParams.get("all") === "1",
         limit: Number(url.searchParams.get("limit") ?? 50) || 50,
       });
-      return json({ sessions: rows.map((row) => ({ ...row, shortId: stripAccount(email, row.id) })) });
+      // The scope names slugs, which no column holds, so the page is narrowed after the
+      // query: a restricted credential can see a page shorter than the limit it asked for.
+      const visible = rows.filter((row) => reachableSession(row, projects));
+      return json({ sessions: visible.map((row) => ({ ...row, shortId: stripAccount(email, row.id) })) });
     } catch (error) {
       return json({ error: "history_failed", detail: String(error) }, 500);
     }
@@ -400,6 +423,18 @@ export class LiveState {
 
   // A GET reads the live tree and a POST writes to it, so the two fleet scopes map
   // straight onto the method. Keys minted here predate scopes and carry both.
+  private async resolveActor(
+    request: Request,
+    state: DurableState,
+  ): Promise<{ email: string; projects: string[] | null } | null> {
+    const email = await this.resolveEmail(request, state);
+    if (!email) return null;
+    const token = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+    // A stored key or the bootstrap key predates project scoping and reaches everything.
+    const identity = await resolveIdentity(this.env, token);
+    return { email, projects: identity?.projects ?? null };
+  }
+
   private async resolveEmail(request: Request, state: DurableState): Promise<string | null> {
     const token = (request.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     if (!token) return null;
@@ -776,14 +811,19 @@ function pruneLive(state: DurableState) {
   return { reapedLive, droppedLive };
 }
 
-function buildLiveTree(account: DurableState["accounts"][string], email: string, filters: SessionFilters) {
+function buildLiveTree(
+  account: DurableState["accounts"][string],
+  email: string,
+  filters: SessionFilters,
+  projects: string[] | null = null,
+) {
   return Object.values(account.machines)
     .filter((machine) => matchesMachineFilter(machine, email, filters.machine))
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
     .map((machine) => ({
       ...machine,
       sessions: Object.values(machine.sessions)
-        .filter((session) => matchesSessionFilters(session, filters))
+        .filter((session) => matchesSessionFilters(session, filters) && reachableSession(session, projects))
         .map((session) => ({
           ...session,
           provider: session.provider ?? null,

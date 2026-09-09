@@ -1,3 +1,5 @@
+import { projectSlug } from "./knowledge.ts";
+
 export type SessionFilters = {
   project: string | null;
   kind: string | null;
@@ -49,4 +51,14 @@ export function matchesMachineFilter(
 function value(url: URL, key: string): string | null {
   const raw = url.searchParams.get(key)?.trim();
   return raw ? raw : null;
+}
+
+// A ?project= names the raw key a machine reported; a credential's scope names slugs.
+// The two are not the same string, so reachability is derived rather than compared.
+export function reachableSession(
+  session: { projectKey?: string | null; project?: string | null },
+  projects: string[] | null,
+): boolean {
+  if (projects === null) return true;
+  return projects.includes(projectSlug(session.projectKey ?? null, session.project ?? null));
 }

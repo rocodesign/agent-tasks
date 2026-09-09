@@ -59,3 +59,26 @@ export async function runSearch(env: SearchEnv, request: SearchRequest) {
   }));
   return { query: request.query, documents };
 }
+
+// AI Search compares one metadata field at a time, so a folder filter cannot name two
+// projects at once. A credential restricted to exactly one project has that project
+// forced; one restricted to several has to say which, or the filter would silently widen
+// to everything.
+export function scopeSearch(
+  request: SearchRequest,
+  projects: string[] | null,
+): { ok: true; request: SearchRequest } | { ok: false; error: string; status: 400 | 403 } {
+  if (projects === null) return { ok: true, request };
+  const named = request.project ? String(request.project).trim() : "";
+  if (named) {
+    return projects.includes(named)
+      ? { ok: true, request: { ...request, project: named } }
+      : { ok: false, error: `this credential cannot read the project ${named}`, status: 403 };
+  }
+  if (projects.length === 1) return { ok: true, request: { ...request, project: projects[0] } };
+  return {
+    ok: false,
+    error: `name one of the projects this credential reads: ${projects.join(", ")}`,
+    status: 400,
+  };
+}

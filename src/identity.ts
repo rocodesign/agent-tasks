@@ -20,10 +20,17 @@ export type Identity = {
   subject: string;
   machine: string | null;
   scopes: FleetScope[];
+  // null means every project. A list is the whole set this credential may ever reach.
+  projects: string[] | null;
 };
 
 export function hasScope(identity: Identity, scope: FleetScope): boolean {
   return identity.scopes.includes(scope);
+}
+
+export function reachesProject(identity: Identity, project: string | null | undefined): boolean {
+  if (identity.projects === null) return true;
+  return typeof project === "string" && identity.projects.includes(project);
 }
 
 export function looksLikeServiceToken(token: string): boolean {
@@ -39,6 +46,18 @@ export function fleetScopes(grants: unknown): FleetScope[] {
   if (record.mode === "full") return [...FLEET_SCOPES];
   if (record.mode !== "scopes" || !Array.isArray(record.scopes)) return [];
   return FLEET_SCOPES.filter((scope) => (record.scopes as unknown[]).includes(scope));
+}
+
+// Keep in sync with fleetProjects in the shell's shared/grants.ts. An absent list means
+// every project; the shell refuses to store an empty one, so a list is never empty here.
+export function fleetProjects(grants: unknown): string[] | null {
+  const fleet = (grants as { fleet?: unknown } | null)?.fleet as
+    | { mode?: unknown; projects?: unknown }
+    | null
+    | undefined;
+  if (!fleet || typeof fleet !== "object" || fleet.mode !== "scopes") return null;
+  if (!Array.isArray(fleet.projects) || !fleet.projects.length) return null;
+  return fleet.projects.filter((project): project is string => typeof project === "string");
 }
 
 type CacheEntry = { identity: Identity | null; expires: number };
@@ -89,6 +108,7 @@ async function introspect(env: IdentityEnv, token: string): Promise<Identity | n
       subject: typeof body.id === "string" ? body.id : email,
       machine: typeof body.machine === "string" ? body.machine : null,
       scopes: fleetScopes(body.grants),
+      projects: fleetProjects(body.grants),
     };
     ttl = Math.min(Math.max(Number(body.ttl ?? 0) * 1000, NEGATIVE_TTL_MS), MAX_TTL_MS);
   } catch {
@@ -103,7 +123,13 @@ async function fromShellJwt(env: IdentityEnv, token: string): Promise<Identity |
   if (!claims) return null;
   const email = claims.email.toLowerCase();
   if (!email.includes("@") || !isAllowedEmail(env, email)) return null;
-  return { email, subject: claims.sub, machine: null, scopes: fleetScopes(claims.grants) };
+  return {
+    email,
+    subject: claims.sub,
+    machine: null,
+    scopes: fleetScopes(claims.grants),
+    projects: fleetProjects(claims.grants),
+  };
 }
 
 // The `at_` keys predate the shell and stay readable until every agent carries a service
@@ -116,6 +142,7 @@ async function fromApiKey(env: IdentityEnv, token: string): Promise<Identity | n
     subject: token.slice(0, 11),
     machine: null,
     scopes: key.role === "orchestrator" ? [...FLEET_SCOPES] : ["read", "publish"],
+    projects: null,
   };
 }
 

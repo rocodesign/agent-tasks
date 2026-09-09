@@ -1,8 +1,8 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { LiveState, type Bindings } from "./live-state.ts";
-import { runSearch } from "./search.ts";
-import { hasScope, resolveIdentity, type FleetScope, type Identity } from "./identity.ts";
+import { runSearch, scopeSearch } from "./search.ts";
+import { hasScope, reachesProject, resolveIdentity, type FleetScope, type Identity } from "./identity.ts";
 import { createDb } from "./db/client.ts";
 import {
   ASSIGNMENT_PRODUCER,
@@ -42,8 +42,10 @@ app.post("/api/search", async (c) => {
   if (identity instanceof Response) return identity;
   const body = await c.req.json().catch(() => ({}) as any);
   if (!body?.query) return c.json({ error: "query is required" }, 400);
+  const scoped = scopeSearch(body, identity.projects);
+  if (!scoped.ok) return c.json({ error: scoped.error }, scoped.status);
   try {
-    return c.json(await runSearch(c.env, body));
+    return c.json(await runSearch(c.env, scoped.request));
   } catch (error: any) {
     return c.json({ error: "search_failed", detail: String(error?.message ?? error) }, 500);
   }
@@ -60,6 +62,9 @@ app.post("/api/events", async (c) => {
   const producer = String(body?.producer ?? "").trim();
   const eventKey = String(body?.eventKey ?? "").trim();
   if (!project || !producer || !eventKey || !text) return c.json({ error: "project, producer, eventKey and body are required" }, 400);
+  if (!reachesProject(identity, project)) {
+    return c.json({ error: `this credential cannot write to the project ${project}` }, 403);
+  }
   if (!POSTABLE.includes(type)) return c.json({ error: `type must be one of ${POSTABLE.join(", ")}` }, 400);
   if ((ORCHESTRATOR_TYPES as readonly string[]).includes(type) && !hasScope(identity, "orchestrate")) {
     return c.json({ error: "this type needs the fleet orchestrate scope" }, 403);
@@ -111,6 +116,9 @@ app.post("/api/launch", async (c) => {
   if (!project || !machine || !launchId || !prompt.trim()) {
     return c.json({ error: "launchId, project, machine and prompt are required" }, 400);
   }
+  if (!reachesProject(identity, project)) {
+    return c.json({ error: `this credential cannot assign work in the project ${project}` }, 403);
+  }
   if (prompt.length > MAX_PROMPT) return c.json({ error: "prompt too large" }, 413);
   try {
     const result = await assignLaunch(createDb(c.env.DB), c.env.KNOWLEDGE, identity.email, {
@@ -146,11 +154,15 @@ app.get("/api/events", async (c) => {
   if (!project && !recipients.length) return c.json({ error: "project or recipient is required" }, 400);
   if (project && recipients.length) return c.json({ error: "a recipient query cannot also filter by project" }, 400);
   if (recipients.length > MAX_RECIPIENTS) return c.json({ error: `at most ${MAX_RECIPIENTS} recipients` }, 400);
+  if (project && !reachesProject(identity, project)) {
+    return c.json({ error: `this credential cannot read the project ${project}` }, 403);
+  }
   try {
     const page = await listEvents(createDb(c.env.DB), identity.email, {
       project: project || undefined,
       recipients,
       launches,
+      projects: identity.projects,
       after: Number(c.req.query("after") ?? 0) || 0,
       limit: Number(c.req.query("limit") ?? 50) || 50,
     });

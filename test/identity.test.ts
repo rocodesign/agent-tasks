@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fleetScopes, hasScope, looksLikeServiceToken, resolveIdentity } from "../src/identity.ts";
+import { fleetProjects, fleetScopes, hasScope, looksLikeServiceToken, reachesProject, resolveIdentity } from "../src/identity.ts";
 
 const ALLOWED = "romeo@copaciu.com";
 
@@ -72,9 +72,54 @@ test("resolves a service token through the shell and answers each scope", async 
     subject: "token-1",
     machine: "vpsp",
     scopes: ["read", "publish"],
+    projects: null,
   });
   assert.equal(hasScope(identity!, "publish"), true);
   assert.equal(hasScope(identity!, "orchestrate"), false);
+});
+
+test("a token narrowed to a project reaches that project and nothing else", async () => {
+  const token = nextToken();
+  const { env } = harness([
+    {
+      status: 200,
+      body: {
+        active: true,
+        id: "token-2",
+        email: ALLOWED,
+        machine: "vpsp",
+        grants: { fleet: { mode: "scopes", scopes: ["read", "publish"], projects: ["bella"] } },
+        ttl: 1800,
+      },
+    },
+  ]);
+
+  const identity = await resolveIdentity(env, token);
+  assert.deepEqual(identity?.projects, ["bella"]);
+  assert.equal(reachesProject(identity!, "bella"), true);
+  assert.equal(reachesProject(identity!, "fleet"), false);
+  assert.equal(reachesProject(identity!, null), false);
+});
+
+test("a token with no project list reaches every project", async () => {
+  const token = nextToken();
+  const { env } = harness([
+    {
+      status: 200,
+      body: {
+        active: true,
+        id: "token-3",
+        email: ALLOWED,
+        machine: "vpsp",
+        grants: { fleet: { mode: "full" } },
+        ttl: 1800,
+      },
+    },
+  ]);
+
+  const identity = await resolveIdentity(env, token);
+  assert.equal(identity?.projects, null);
+  assert.equal(reachesProject(identity!, "anything"), true);
 });
 
 test("asks the shell once for the same token", async () => {
@@ -123,4 +168,10 @@ test("refuses a token for an address outside the allowlist", async () => {
 
 test("refuses a service token when no shell is configured", async () => {
   assert.equal(await resolveIdentity({ ALLOWED_EMAILS: ALLOWED, DB: null as never }, nextToken()), null);
+});
+
+test("an empty project list is read as no restriction rather than no access", () => {
+  assert.equal(fleetProjects({ fleet: { mode: "scopes", scopes: ["read"], projects: [] } }), null);
+  assert.equal(fleetProjects({ fleet: { mode: "full" } }), null);
+  assert.deepEqual(fleetProjects({ fleet: { mode: "scopes", scopes: ["read"], projects: ["bella"] } }), ["bella"]);
 });

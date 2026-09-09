@@ -117,7 +117,15 @@ export async function publishEvent(
 export async function listEvents(
   db: DB,
   email: string,
-  params: { project?: string; recipients?: string[]; launches?: string[]; after?: number; limit?: number },
+  params: {
+    project?: string;
+    recipients?: string[];
+    launches?: string[];
+    after?: number;
+    limit?: number;
+    // The projects this credential may read. Undefined or null is every project.
+    projects?: string[] | null;
+  },
 ) {
   const recipients = [...new Set((params.recipients ?? []).map((value) => value.trim()).filter(Boolean))];
   const launches = [...new Set((params.launches ?? []).map((value) => value.trim()).filter(Boolean))];
@@ -127,6 +135,15 @@ export async function listEvents(
   if (launches.length > MAX_RECIPIENTS) throw new Error(`at most ${MAX_RECIPIENTS} launches`);
   const filters: SQL[] = [eq(events.accountEmail, email), gt(events.id, params.after ?? 0)];
   if (params.project) filters.push(eq(events.project, params.project));
+  // A recipient query names ids, not projects, so without this a restricted credential
+  // would read another project's stream by knowing one of its launch ids.
+  if (params.projects) {
+    filters.push(
+      params.projects.length === 1
+        ? eq(events.project, params.projects[0])
+        : (inArray(events.project, params.projects) as SQL),
+    );
+  }
   if (recipients.length) {
     filters.push(
       recipients.length === 1 ? eq(events.recipient, recipients[0]) : (inArray(events.recipient, recipients) as SQL),
