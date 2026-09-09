@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { sqliteTable, text, integer, index, uniqueIndex, primaryKey } from "drizzle-orm/sqlite-core";
 
 // Plain SQLite DDL for Cloudflare D1. Multi-tenant: every row is owned by an
@@ -21,6 +22,7 @@ export const apiKeys = sqliteTable(
       .references(() => accounts.email, { onDelete: "cascade" }),
     keyHash: text("key_hash").notNull().unique(), // sha-256 hex; plaintext shown once
     prefix: text("prefix").notNull(), // e.g. "at_AbCdEf" for display
+    role: text("role"), // "orchestrator" may assign and cancel work; null is an ordinary agent
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
     lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }),
   },
@@ -114,13 +116,19 @@ export const events = sqliteTable(
     delegation: text("delegation"),
     machineId: text("machine_id"),
     recipient: text("recipient"),
+    launch: text("launch"), // one intentional start; a delegation may have several
     replyTo: integer("reply_to"),
     body: text("body").notNull(),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
   },
   (t) => ({
     keyIdx: uniqueIndex("events_key_idx").on(t.accountEmail, t.producer, t.eventKey),
+    // One assignment per launch, whoever produced it.
+    assignmentIdx: uniqueIndex("events_assignment_idx")
+      .on(t.accountEmail, t.launch)
+      .where(sql`${t.type} = 'delegation.assigned'`),
     streamIdx: index("events_stream_idx").on(t.accountEmail, t.project, t.id),
+    recipientIdx: index("events_recipient_idx").on(t.accountEmail, t.recipient, t.id),
     createdIdx: index("events_created_idx").on(t.createdAt),
   }),
 );

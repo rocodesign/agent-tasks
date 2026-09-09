@@ -137,6 +137,20 @@ npm run deploy
 
 Serves at `fleet.copaciu.com` (and the `*.workers.dev` URL).
 
+### Grant the orchestrator role
+
+`POST /api/launch` and `launch.cancelled` need a key whose `api_keys.role` is
+`orchestrator`. Every existing key has a null role and cannot assign work, so grant it
+once, to Majordomo's key only:
+
+```sh
+npx wrangler d1 execute agent-tasks --remote \
+  --command "UPDATE api_keys SET role = 'orchestrator' WHERE prefix = '<the key prefix>'"
+```
+
+Check it with `SELECT prefix, role FROM api_keys` before assigning any work. Any other key
+holder can still read and post, but cannot start work on a machine.
+
 ## One-off Neon import
 
 The archive used to live in Neon Postgres. `scripts/export-neon.mjs` dumps every

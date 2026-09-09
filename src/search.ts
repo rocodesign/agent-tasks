@@ -26,12 +26,20 @@ export function buildFilters(request: SearchRequest): Comparison | { type: "and"
   return clauses.length === 1 ? clauses[0] : { type: "and", filters: clauses };
 }
 
-export async function resolveKeyEmail(env: SearchEnv, token: string): Promise<string | null> {
+export async function resolveKey(env: SearchEnv, token: string): Promise<{ email: string; role: string | null } | null> {
   if (!token) return null;
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-  const rows = await createDb(env.DB).select({ email: apiKeys.email }).from(apiKeys).where(eq(apiKeys.keyHash, hash)).limit(1);
-  return rows[0]?.email ?? null;
+  const rows = await createDb(env.DB)
+    .select({ email: apiKeys.email, role: apiKeys.role })
+    .from(apiKeys)
+    .where(eq(apiKeys.keyHash, hash))
+    .limit(1);
+  return rows[0] ? { email: rows[0].email, role: rows[0].role ?? null } : null;
+}
+
+export async function resolveKeyEmail(env: SearchEnv, token: string): Promise<string | null> {
+  return (await resolveKey(env, token))?.email ?? null;
 }
 
 export async function runSearch(env: SearchEnv, request: SearchRequest) {
