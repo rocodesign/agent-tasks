@@ -15,7 +15,8 @@ name = "LIVE_STATE"
 class_name = "LiveState"
 
 # One relay per machine, carrying console frames to that machine's Codex app server. It
-# stores nothing, so it takes no storage class and hibernates between turns.
+# writes nothing and hibernates between turns. The class is declared SQLite-backed because
+# the plan allows no other kind, not because it keeps anything.
 [[durable_objects.bindings]]
 name = "RELAY"
 class_name = "MachineRelay"
@@ -26,7 +27,7 @@ new_sqlite_classes = ["LiveState"]
 
 [[migrations]]
 tag = "v2"
-new_classes = ["MachineRelay"]
+new_sqlite_classes = ["MachineRelay"]
 
 # Archive tier. Schema lives in drizzle/; apply with npm run db:migrate:remote.
 [[d1_databases]]
