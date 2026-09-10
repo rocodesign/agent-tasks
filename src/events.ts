@@ -10,6 +10,7 @@ export const SYSTEM_TYPES = [
   "session.ended",
   "session.summarized",
   "task.completed",
+  "launch.expired",
 ] as const;
 
 // An assignment starts a process on another machine, so it is never posted through the
@@ -19,6 +20,17 @@ export const ASSIGNMENT_PRODUCER = "orchestrator";
 // Only a key with the orchestrator role may publish these.
 export const ORCHESTRATOR_TYPES = ["launch.cancelled"] as const;
 export const DEPUTY_TYPES = ["launch.claimed", "launch.started", "launch.failed"] as const;
+// The Stop hook says which steering event actually reached a session's turn boundary.
+export const DELIVERY_TYPES = ["steer.delivered"] as const;
+
+// delegation.assigned is missing on purpose: an assignment exists only through /api/launch,
+// where the prompt and the launch identity are checked.
+export const POSTABLE_TYPES = [
+  ...POST_TYPES,
+  ...DEPUTY_TYPES,
+  ...ORCHESTRATOR_TYPES,
+  ...DELIVERY_TYPES,
+] as readonly string[];
 
 // A machine that was offline for a day must not start work that was reassigned while it
 // was away, and its own clock cannot decide that: Fleet answers with the server's clock
@@ -212,6 +224,57 @@ export async function insertAssignment(db: DB, input: EventInput): Promise<{ id:
   return { id: existing.id, duplicate: true };
 }
 
+export const EXPIRY_TYPE = "launch.expired";
+export const EXPIRY_NOTE = "no deputy claimed this launch within 6 hours";
+// D1 allows 100 bound parameters per statement and each launch id is one of them.
+const ID_BATCH = 80;
+
+// An unclaimed assignment is otherwise silent forever: the deputy that never saw it
+// reports nothing, so only this pass can close the launch. The key makes the close
+// idempotent, so a cron that runs twice over the same launch still writes one event.
+export async function expireStaleLaunches(db: DB): Promise<{ expired: number }> {
+  const cutoff = new Date(Date.now() - CLAIM_WINDOW_MS);
+  const assignments = await db
+    .select()
+    .from(events)
+    .where(and(eq(events.type, ASSIGNMENT_TYPE), isNotNull(events.launch), lt(events.createdAt, cutoff)));
+  if (!assignments.length) return { expired: 0 };
+
+  const settled = new Set<string>();
+  const ids = assignments.map((row) => row.launch as string);
+  for (let start = 0; start < ids.length; start += ID_BATCH) {
+    const rows = await db
+      .select({ launch: events.launch })
+      .from(events)
+      .where(
+        and(
+          inArray(events.type, ["launch.claimed", "launch.cancelled", EXPIRY_TYPE]),
+          inArray(events.launch, ids.slice(start, start + ID_BATCH)),
+        ),
+      );
+    for (const row of rows) if (row.launch) settled.add(row.launch);
+  }
+
+  let expired = 0;
+  for (const assignment of assignments) {
+    if (settled.has(assignment.launch as string)) continue;
+    await insertEvent(db, {
+      accountEmail: assignment.accountEmail,
+      project: assignment.project,
+      type: EXPIRY_TYPE,
+      producer: "fleet",
+      eventKey: `expired:${assignment.launch}`,
+      delegation: assignment.delegation,
+      machineId: assignment.machineId,
+      recipient: assignment.recipient,
+      launch: assignment.launch,
+      body: JSON.stringify({ note: EXPIRY_NOTE }),
+    });
+    expired += 1;
+  }
+  return { expired };
+}
+
 export async function purgeOldEvents(db: DB): Promise<{ removed: number }> {
   const cutoff = new Date(Date.now() - EVENT_RETENTION_MS);
   const rows = await db.delete(events).where(lt(events.createdAt, cutoff)).returning({ id: events.id });
@@ -226,6 +289,14 @@ export async function launchIdsForProject(db: DB, email: string, project: string
     .from(events)
     .where(and(eq(events.accountEmail, email), eq(events.project, project), isNotNull(events.launch)));
   return rows.map((row) => row.launch).filter((id): id is string => Boolean(id));
+}
+
+export async function countProjectEvents(db: DB, email: string, project: string): Promise<number> {
+  const rows = await db
+    .select({ id: events.id })
+    .from(events)
+    .where(and(eq(events.accountEmail, email), eq(events.project, project)));
+  return rows.length;
 }
 
 export async function purgeProjectEvents(db: DB, email: string, project: string): Promise<{ removed: number }> {

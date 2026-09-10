@@ -88,6 +88,31 @@ test("a drop removes the project's sessions, follow-ups, events and objects", as
   assert.ok(await r2.get("sessions/fleet/keeper.md"));
 });
 
+test("a rehearsal counts what a drop would take and removes none of it", async (t) => {
+  const { db, miniflare, bucket } = await populated();
+  t.after(() => miniflare.dispose());
+  const r2 = (await bucket()) as any;
+
+  await writeSessionKnowledge(db, r2, EMAIL, "doomed-1", {});
+  await storeLaunchPrompt(r2, "l-20260909-0a1b2c3d", "Do the thing.");
+
+  const rehearsal = await purgeProject(db, r2, EMAIL, "bella", { dryRun: true });
+  assert.equal(rehearsal.dryRun, true);
+  assert.equal(rehearsal.sessions.length, 2);
+  assert.ok(rehearsal.events >= 1);
+  assert.equal(rehearsal.objects, 2);
+
+  assert.equal((await db.select({ id: sessions.id }).from(sessions).where(eq(sessions.accountEmail, EMAIL))).length, 3);
+  assert.ok(await r2.get("sessions/bella/doomed-1.md"));
+  assert.ok(await r2.get("launches/l-20260909-0a1b2c3d.md"));
+
+  const real = await purgeProject(db, r2, EMAIL, "bella");
+  assert.equal(real.dryRun, false);
+  assert.equal(real.sessions.length, rehearsal.sessions.length);
+  assert.equal(real.events, rehearsal.events);
+  assert.equal(real.objects, rehearsal.objects);
+});
+
 test("a slug that matched nothing changes nothing", async (t) => {
   const { db, miniflare, bucket } = await populated();
   t.after(() => miniflare.dispose());

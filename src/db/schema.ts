@@ -76,6 +76,7 @@ export const sessions = sqliteTable(
     category: text("category"),
     decisions: text("decisions", { mode: "json" }).$type<string[]>(),
     tags: text("tags", { mode: "json" }).$type<string[]>(),
+    proposedTags: text("proposed_tags", { mode: "json" }).$type<string[]>(),
     title: text("title"),
     provider: text("provider"),
     summary: text("summary"), // AI-generated post-session digest; null until enriched
@@ -83,6 +84,10 @@ export const sessions = sqliteTable(
     // Opaque transcript cursor from the summarizer; null means no summary was attempted.
     summarizedThrough: text("summarized_through"),
     summarizedAt: integer("summarized_at", { mode: "timestamp_ms" }),
+    // Set when the summarizer gave up on this session; cleared by a later summary.
+    digestFailedAt: integer("digest_failed_at", { mode: "timestamp_ms" }),
+    digestFailedReason: text("digest_failed_reason"),
+    digestFailedAttempts: integer("digest_failed_attempts"),
     status: text("status").notNull().default("active"), // active | idle | ended
     endedReason: text("ended_reason"), // null while live; hook | reaper once ended
     startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
@@ -133,6 +138,26 @@ export const events = sqliteTable(
   }),
 );
 
+// One row per long-running machine process, rewritten by its own heartbeat. Deliberately
+// without history: the only question asked of it is whether the process is alive now.
+export const machineProcesses = sqliteTable(
+  "machine_processes",
+  {
+    accountEmail: text("account_email")
+      .notNull()
+      .references(() => accounts.email, { onDelete: "cascade" }),
+    machine: text("machine").notNull(), // the raw machine name, as the token reports it
+    process: text("process").notNull(), // deputy | relay | sidecar
+    lastSeen: integer("last_seen", { mode: "timestamp_ms" }).notNull().$defaultFn(now),
+    intervalMs: integer("interval_ms").notNull(),
+    version: text("version"),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.accountEmail, t.machine, t.process] }),
+    accountIdx: index("machine_processes_account_idx").on(t.accountEmail),
+  }),
+);
+
 export const tasks = sqliteTable(
   "tasks",
   {
@@ -180,4 +205,5 @@ export type Machine = typeof machines.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type Event = typeof events.$inferSelect;
+export type MachineProcess = typeof machineProcesses.$inferSelect;
 export type Dismissal = typeof dismissals.$inferSelect;

@@ -15,7 +15,7 @@
     "db:migrate:local": "wrangler d1 migrations apply agent-tasks --local",
     "db:migrate:remote": "wrangler d1 migrations apply agent-tasks --remote",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "npm run typecheck && node --test test/session-metadata.test.ts test/session-groups.test.ts test/session-stack-layout.test.ts test/shell-jwt.test.ts test/identity.test.ts test/session-filters.test.ts test/knowledge.test.ts test/store-d1.test.ts test/knowledge-r2.test.ts test/search.test.ts test/events.test.ts test/launch.test.ts test/purge-project.test.ts test/project-scope.test.ts test/relay.test.ts"
+    "test": "npm run typecheck && node --test test/session-metadata.test.ts test/session-groups.test.ts test/session-stack-layout.test.ts test/shell-jwt.test.ts test/identity.test.ts test/session-filters.test.ts test/knowledge.test.ts test/store-d1.test.ts test/knowledge-r2.test.ts test/search.test.ts test/events.test.ts test/launch.test.ts test/launch-state.test.ts test/processes.test.ts test/digest-failures.test.ts test/purge-project.test.ts test/project-scope.test.ts test/relay.test.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.38.3",

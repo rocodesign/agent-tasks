@@ -4,6 +4,19 @@ import { ASSIGNMENT_PRODUCER, ASSIGNMENT_TYPE, findAssignment, insertAssignment,
 export const MAX_PROMPT = 256 * 1024;
 export const MAX_CWD = 512;
 export const LAUNCH_ID_PATTERN = /^l-\d{8}-[0-9a-f]{8}$/;
+export const DELEGATION_ID_PATTERN = /^d-\d{8}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const MAX_DELEGATION = 48;
+
+// A delegation id is an address other agents subscribe to, so a typo does not fail: it
+// creates a second delegation nobody is listening on. Rows written before the shape was
+// agreed keep whatever they carry; only a new launch is held to it.
+export function delegationProblem(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return "a delegation id is a string";
+  if (value.length > MAX_DELEGATION) return `a delegation id is at most ${MAX_DELEGATION} characters`;
+  if (!DELEGATION_ID_PATTERN.test(value)) return "a delegation id looks like d-20260910-fix-brief";
+  return null;
+}
 
 export class LaunchConflict extends Error {
   readonly status: number;
@@ -75,6 +88,7 @@ export async function assignLaunch(db: DB, bucket: R2Bucket, email: string, inpu
   // The caller mints the id, so a lost response can be retried without creating a second
   // launch. A server-minted id would make every retry a new assignment.
   if (!LAUNCH_ID_PATTERN.test(launchId)) throw new LaunchConflict("launch id must look like l-20260909-0a1b2c3d", 400);
+  if (delegationProblem(input.delegation)) throw new LaunchConflict("invalid delegation id", 400);
   if (input.prompt.length > MAX_PROMPT) throw new LaunchConflict("prompt too large", 413);
   const cwd = input.cwd ?? null;
   if (cwd !== null && (typeof cwd !== "string" || cwd.length > MAX_CWD)) {

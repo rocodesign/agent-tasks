@@ -8,6 +8,7 @@ import {
   enrichSession,
   titleSession,
   ingestSnapshot,
+  listFailedDigests,
   listHistorySessions,
   namespaced,
   purgeOldEndedSessions,
@@ -35,7 +36,8 @@ import {
 } from "./auth.ts";
 import { hasScope, resolveIdentity } from "./identity.ts";
 import { deleteSessionKnowledge, projectSlug, writeSessionKnowledge } from "./knowledge.ts";
-import { purgeOldEvents } from "./events.ts";
+import { expireStaleLaunches, purgeOldEvents } from "./events.ts";
+import { processesByMachine, type ProcessStatus } from "./processes.ts";
 import {
   matchesMachineFilter,
   matchesSessionFilters,
@@ -176,7 +178,10 @@ export class LiveState {
       return json({ version: account.version });
     }
     if (path === "/api/tree" && request.method === "GET") {
-      return json({ machines: buildLiveTree(account, email, readSessionFilters(url), projects) });
+      // The processes come from D1 rather than live state: a deputy that reports no
+      // session has nothing in the tree, and its silence is the answer being asked for.
+      const processes = await processesByMachine(createDb(this.env.DB), email).catch(() => new Map<string, ProcessStatus[]>());
+      return json({ machines: buildLiveTree(account, email, readSessionFilters(url), projects, processes) });
     }
     if (path === "/api/ingest" && request.method === "POST") {
       const body: any = await request.json().catch(() => null);
@@ -298,7 +303,10 @@ export class LiveState {
       await this.changed(state);
       return json({ ok: true });
     }
-    if (path === "/api/project/purge" && request.method === "POST") {
+    // The shell owns the outer /api/drop-project, which spans Fleet and the wiki. Fleet
+    // answers to the same name so a caller that reaches this worker directly needs no
+    // second vocabulary for the same act.
+    if ((path === "/api/project/purge" || path === "/api/drop-project") && request.method === "POST") {
       return this.purgeProject(request, state, email);
     }
     return json({ error: "not_found" }, 404);
@@ -312,15 +320,18 @@ export class LiveState {
       return json({ error: "this call needs the fleet orchestrate scope" }, 403);
     }
     const body: any = await request.json().catch(() => ({}));
-    const slug = String(body?.project ?? "").trim();
+    const slug = String(body?.project ?? body?.slug ?? "").trim();
+    const dryRun = body?.dryRun === true;
     if (!slug) return json({ error: "project required" }, 400);
-    if (String(body?.confirm ?? "") !== slug) {
+    // A rehearsal removes nothing, so it needs no second reading of the slug. It is also
+    // what produces the number the real drop is confirmed against.
+    if (!dryRun && String(body?.confirm ?? "") !== slug) {
       return json({ error: "repeat the project in confirm to purge it" }, 400);
     }
 
     let result;
     try {
-      result = await purgeProject(createDb(this.env.DB), this.env.KNOWLEDGE, email, slug);
+      result = await purgeProject(createDb(this.env.DB), this.env.KNOWLEDGE, email, slug, { dryRun });
     } catch (error) {
       return json({ error: "purge_failed", detail: String(error) }, 500);
     }
@@ -330,11 +341,16 @@ export class LiveState {
     for (const machine of Object.values(account.machines)) {
       for (const session of Object.values(machine.sessions)) {
         if (projectSlug(session.projectKey ?? null, session.project) !== slug) continue;
-        removeLive(account, session.id);
-        removeQueuedSessionEvents(state, email, session.id);
+        if (!dryRun) {
+          removeLive(account, session.id);
+          removeQueuedSessionEvents(state, email, session.id);
+        }
         live += 1;
       }
     }
+    const counts = { sessions: result.sessions.length, events: result.events, knowledgeObjects: result.objects, live };
+    if (dryRun) return json({ slug, dryRun: true, counts });
+
     // A queued archive write would resurrect a purged session on the next flush.
     for (const [id, event] of Object.entries(state.archive)) {
       if (event.email === email && result.sessions.includes(namespaced(email, String(event.body?.sessionId ?? event.body?.session?.id ?? "")))) {
@@ -343,7 +359,7 @@ export class LiveState {
     }
     account.version = Date.now();
     await this.changed(state);
-    return json({ ...result, sessions: result.sessions.length, live });
+    return json({ slug, dryRun: false, counts });
   }
 
   // Durable session history for the orchestrator: summarized sessions from D1, newest
@@ -351,8 +367,10 @@ export class LiveState {
   // ?machine=, ?since= (ISO date), ?all=1 (include unsummarized), ?limit= (default 50, max 500).
   private async historySessions(url: URL, email: string, projects: string[] | null): Promise<Response> {
     try {
-      const rows = await listHistorySessions(createDb(this.env.DB), email, {
-        ...readSessionFilters(url),
+      const db = createDb(this.env.DB);
+      const filters = readSessionFilters(url);
+      const rows = await listHistorySessions(db, email, {
+        ...filters,
         since: url.searchParams.get("since"),
         all: url.searchParams.get("all") === "1",
         limit: Number(url.searchParams.get("limit") ?? 50) || 50,
@@ -360,7 +378,10 @@ export class LiveState {
       // The scope names slugs, which no column holds, so the page is narrowed after the
       // query: a restricted credential can see a page shorter than the limit it asked for.
       const visible = rows.filter((row) => reachableSession(row, projects));
-      return json({ sessions: visible.map((row) => ({ ...row, shortId: stripAccount(email, row.id) })) });
+      // A session whose digest was abandoned never enters the page above, summarized or
+      // not. It rides beside it so a caller sees the gap rather than a shorter list.
+      const failed = await listFailedDigests(db, email, filters, projects);
+      return json({ sessions: visible.map((row) => ({ ...row, shortId: stripAccount(email, row.id) })), failed });
     } catch (error) {
       return json({ error: "history_failed", detail: String(error) }, 500);
     }
@@ -470,17 +491,21 @@ export class LiveState {
     const pruned = pruneLive(state);
     let reaped = 0;
     let purged = 0;
+    let expired = 0;
     try {
       const db = createDb(this.env.DB);
       reaped = (await reapStaleSessions(db)).ended;
       purged = (await purgeOldEndedSessions(db)).removed;
+      // Before the retention pass: an assignment removed with the old events would leave
+      // its launch with no outcome at all.
+      expired = (await expireStaleLaunches(db)).expired;
       await purgeOldEvents(db);
     } catch (error) {
       // Postgres maintenance is retried by the next cron; live pruning already ran.
       console.error("[maintenance] postgres pass failed", error);
     }
     await this.flushArchive(state);
-    return json({ ok: true, ...pruned, reaped, purged });
+    return json({ ok: true, ...pruned, reaped, purged, expired });
   }
 
   private async changed(state: DurableState): Promise<void> {
@@ -817,12 +842,14 @@ function buildLiveTree(
   email: string,
   filters: SessionFilters,
   projects: string[] | null = null,
+  processes: Map<string, ProcessStatus[]> = new Map(),
 ) {
   return Object.values(account.machines)
     .filter((machine) => matchesMachineFilter(machine, email, filters.machine))
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
     .map((machine) => ({
       ...machine,
+      processes: processes.get(stripAccount(email, machine.id)) ?? processes.get(machine.hostname) ?? [],
       sessions: Object.values(machine.sessions)
         .filter((session) => matchesSessionFilters(session, filters) && reachableSession(session, projects))
         .map((session) => ({

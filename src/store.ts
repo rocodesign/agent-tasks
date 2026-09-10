@@ -1,8 +1,8 @@
 import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray, inArray } from "drizzle-orm";
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
-import { HISTORY_HIDDEN_KINDS, type SessionFilters } from "./session-filters.ts";
-import { insertEvent, launchIdsForProject, purgeProjectEvents, systemEvent } from "./events.ts";
+import { HISTORY_HIDDEN_KINDS, reachableSession, type SessionFilters } from "./session-filters.ts";
+import { countProjectEvents, insertEvent, launchIdsForProject, purgeProjectEvents, systemEvent } from "./events.ts";
 import { projectSlug } from "./knowledge.ts";
 import { launchPromptKey } from "./launch.ts";
 import { normalizeProvider, pickSessionMeta, sessionRelation, type SessionMeta } from "./session-metadata.ts";
@@ -168,35 +168,13 @@ export async function listHistorySessions(
   email: string,
   params: SessionFilters & { since?: string | null; all?: boolean; limit?: number },
 ) {
-  const conditions = [eq(sessions.accountEmail, email)];
+  const conditions = [eq(sessions.accountEmail, email), ...sessionScope(db, email, params)];
   if (!params.all) conditions.push(isNotNull(sessions.summary));
-  if (params.project) {
-    conditions.push(
-      or(eq(sessions.projectKey, params.project), and(isNull(sessions.projectKey), eq(sessions.project, params.project)))!,
-    );
-  }
   if (params.kind) {
     const kinds = params.kind.split(",").map((entry) => entry.trim()).filter(Boolean);
     conditions.push(kinds.length === 1 ? eq(sessions.kind, kinds[0]) : inArray(sessions.kind, kinds));
   }
   else conditions.push(or(isNull(sessions.kind), notInArray(sessions.kind, HISTORY_HIDDEN_KINDS))!);
-  if (params.delegation) conditions.push(eq(sessions.delegation, params.delegation));
-  if (params.machine) {
-    conditions.push(
-      inArray(
-        sessions.machineId,
-        db
-          .select({ id: machines.id })
-          .from(machines)
-          .where(
-            and(
-              eq(machines.accountEmail, email),
-              or(eq(machines.hostname, params.machine), eq(machines.id, `${email}::${params.machine}`)),
-            ),
-          ),
-      ),
-    );
-  }
   if (params.since && !Number.isNaN(Date.parse(params.since))) {
     conditions.push(gte(sessions.lastActivityAt, new Date(params.since)));
   }
@@ -221,6 +199,106 @@ export async function listHistorySessions(
   }
   const bySession = groupBy(generated, (task) => task.sessionId);
   return rows.map((row) => ({ ...row, generatedTasks: bySession.get(row.id) ?? [] }));
+}
+
+// Shared by the history read and the failed-digest read: a change here moves both.
+function sessionScope(db: DB, email: string, params: Pick<SessionFilters, "project" | "delegation" | "machine">) {
+  const conditions = [];
+  if (params.project) {
+    conditions.push(
+      or(eq(sessions.projectKey, params.project), and(isNull(sessions.projectKey), eq(sessions.project, params.project)))!,
+    );
+  }
+  if (params.delegation) conditions.push(eq(sessions.delegation, params.delegation));
+  if (params.machine) {
+    conditions.push(
+      inArray(
+        sessions.machineId,
+        db
+          .select({ id: machines.id })
+          .from(machines)
+          .where(
+            and(
+              eq(machines.accountEmail, email),
+              or(eq(machines.hostname, params.machine), eq(machines.id, `${email}::${params.machine}`)),
+            ),
+          ),
+      ),
+    );
+  }
+  return conditions;
+}
+
+export type FailedDigest = {
+  sessionId: string;
+  machine: string;
+  title: string | null;
+  endedAt: string | null;
+  failedAt: string | null;
+  reason: string | null;
+  attempts: number | null;
+};
+
+export const MAX_DIGEST_REASON = 500;
+
+// Recorded rather than retried: the attempts already failed, and a session nobody knows
+// about is worse than one that says why it is missing.
+export async function markDigestFailed(
+  db: DB,
+  email: string,
+  body: any,
+): Promise<{ error?: string; failed?: string }> {
+  const rawSessionId = String(body?.sessionId ?? "").trim();
+  if (!rawSessionId) return { error: "sessionId required" };
+  const reason = String(body?.reason ?? "").trim().slice(0, MAX_DIGEST_REASON);
+  const attempts = Number(body?.attempts);
+  const sessionId = namespaced(email, rawSessionId);
+  const updated = await db
+    .update(sessions)
+    .set({
+      digestFailedAt: new Date(),
+      digestFailedReason: reason || null,
+      digestFailedAttempts: Number.isFinite(attempts) ? Math.trunc(attempts) : null,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)))
+    .returning({ id: sessions.id });
+  if (!updated.length) return { error: "not_found" };
+  return { failed: sessionId };
+}
+
+// A session whose digest failed and never arrived. One that was summarized afterwards is
+// no longer a failure, whatever the column still holds.
+export async function listFailedDigests(
+  db: DB,
+  email: string,
+  params: SessionFilters,
+  projects: string[] | null = null,
+): Promise<FailedDigest[]> {
+  const rows = await db
+    .select()
+    .from(sessions)
+    .where(
+      and(
+        eq(sessions.accountEmail, email),
+        isNotNull(sessions.digestFailedAt),
+        isNull(sessions.summary),
+        ...sessionScope(db, email, params),
+      ),
+    )
+    .orderBy(desc(sessions.digestFailedAt))
+    .limit(200);
+  return rows
+    .filter((row) => reachableSession(row, projects))
+    .map((row) => ({
+      sessionId: stripAccount(email, row.id),
+      machine: stripAccount(email, row.machineId),
+      title: row.title,
+      endedAt: row.lastActivityAt?.toISOString() ?? null,
+      failedAt: row.digestFailedAt?.toISOString() ?? null,
+      reason: row.digestFailedReason,
+      attempts: row.digestFailedAttempts,
+    }));
 }
 
 export async function computeVersion(db: DB, email: string): Promise<number> {
@@ -455,7 +533,15 @@ export async function enrichSession(
       summarizedAt: now,
       updatedAt: now,
       ...pickSessionMeta(body),
-      ...(body?.summary ? { summary: String(body.summary).slice(0, 8000) } : {}),
+      // A summary that finally arrives settles the failure the summarizer reported.
+      ...(body?.summary
+        ? {
+            summary: String(body.summary).slice(0, 8000),
+            digestFailedAt: null,
+            digestFailedReason: null,
+            digestFailedAttempts: null,
+          }
+        : {}),
       ...(body?.title ? { title: String(body.title).slice(0, 300) } : {}),
     })
     .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)))
@@ -667,7 +753,9 @@ export async function purgeProject(
   bucket: R2Bucket,
   email: string,
   slug: string,
-): Promise<{ slug: string; sessions: string[]; events: number; objects: number }> {
+  options: { dryRun?: boolean } = {},
+): Promise<{ slug: string; dryRun: boolean; sessions: string[]; events: number; objects: number }> {
+  const dryRun = options.dryRun === true;
   const candidates = await db
     .select({ id: sessions.id, project: sessions.project, projectKey: sessions.projectKey })
     .from(sessions)
@@ -675,14 +763,18 @@ export async function purgeProject(
   const doomed = candidates.filter((row) => projectSlug(row.projectKey, row.project) === slug).map((row) => row.id);
 
   const launches = await launchIdsForProject(db, email, slug);
-  const { removed } = await purgeProjectEvents(db, email, slug);
+  const removed = dryRun
+    ? await countProjectEvents(db, email, slug)
+    : (await purgeProjectEvents(db, email, slug)).removed;
 
-  for (const batch of chunk(doomed, 50)) {
-    // D1 does not enforce the cascade, so the children go first: an orphaned task would
-    // keep the follow-up visible in every brief.
-    await db.delete(tasks).where(and(eq(tasks.accountEmail, email), inArray(tasks.sessionId, batch)));
-    await db.delete(dismissals).where(and(eq(dismissals.accountEmail, email), inArray(dismissals.sessionId, batch)));
-    await db.delete(sessions).where(and(eq(sessions.accountEmail, email), inArray(sessions.id, batch)));
+  if (!dryRun) {
+    for (const batch of chunk(doomed, 50)) {
+      // D1 does not enforce the cascade, so the children go first: an orphaned task would
+      // keep the follow-up visible in every brief.
+      await db.delete(tasks).where(and(eq(tasks.accountEmail, email), inArray(tasks.sessionId, batch)));
+      await db.delete(dismissals).where(and(eq(dismissals.accountEmail, email), inArray(dismissals.sessionId, batch)));
+      await db.delete(sessions).where(and(eq(sessions.accountEmail, email), inArray(sessions.id, batch)));
+    }
   }
 
   let objects = 0;
@@ -690,18 +782,21 @@ export async function purgeProject(
   do {
     const page = await bucket.list({ prefix: `sessions/${slug}/`, cursor });
     for (const object of page.objects) {
-      await bucket.delete(object.key);
+      if (!dryRun) await bucket.delete(object.key);
       objects += 1;
     }
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
 
   for (const launchId of launches) {
-    await bucket.delete(launchPromptKey(launchId));
+    const key = launchPromptKey(launchId);
+    // Counted only when it is there, so the rehearsal and the drop report the same number.
+    if (!(await bucket.head(key))) continue;
+    if (!dryRun) await bucket.delete(key);
     objects += 1;
   }
 
-  return { slug, sessions: doomed, events: removed, objects };
+  return { slug, dryRun, sessions: doomed, events: removed, objects };
 }
 
 function chunk<T>(items: T[], size: number): T[][] {

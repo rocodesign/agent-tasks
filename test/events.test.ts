@@ -2,7 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { eq } from "drizzle-orm";
 import { accounts, events } from "../src/db/schema.ts";
-import { listEvents, publishEvent, purgeOldEvents, purgeProjectEvents } from "../src/events.ts";
+import {
+  ASSIGNMENT_TYPE,
+  countProjectEvents,
+  listEvents,
+  POSTABLE_TYPES,
+  publishEvent,
+  purgeOldEvents,
+  purgeProjectEvents,
+  SYSTEM_TYPES,
+} from "../src/events.ts";
 import { completeTask, endSession, enrichSession, startSession, titleSession } from "../src/store.ts";
 import { freshDb } from "./helpers/d1.ts";
 
@@ -26,6 +35,44 @@ function post(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as any;
 }
+
+test("a delivery report is postable and an assignment still is not", () => {
+  assert.equal(POSTABLE_TYPES.includes("steer.delivered"), true);
+  assert.equal(POSTABLE_TYPES.includes(ASSIGNMENT_TYPE), false);
+  assert.equal((SYSTEM_TYPES as readonly string[]).includes("launch.expired"), true);
+});
+
+test("a delivery report names the steering event it delivered", async (t) => {
+  const { db } = await seeded(t);
+  const steer = await publishEvent(db, post({ type: "decision", eventKey: "d1", body: "Ship it." }));
+  const delivered = await publishEvent(
+    db,
+    post({
+      type: "steer.delivered",
+      producer: "council-inject",
+      eventKey: `delivered:${steer.id}`,
+      replyTo: steer.id,
+      recipient: "s-1",
+      body: JSON.stringify({ note: "injected at turn boundary", sessionId: "s-1" }),
+    }),
+  );
+
+  const page = await listEvents(db, EMAIL, { project: "bella" });
+  const report = page.events.find((event) => event.id === delivered.id);
+  assert.equal(report?.type, "steer.delivered");
+  assert.equal(report?.replyTo, steer.id);
+});
+
+test("counting a project's events matches what a purge would remove", async (t) => {
+  const { db } = await seeded(t);
+  await publishEvent(db, post({ project: "bella", eventKey: "a" }));
+  await publishEvent(db, post({ project: "bella", eventKey: "b" }));
+  await publishEvent(db, post({ project: "fleet", eventKey: "c" }));
+
+  assert.equal(await countProjectEvents(db, EMAIL, "bella"), 2);
+  assert.equal((await purgeProjectEvents(db, EMAIL, "bella")).removed, 2);
+  assert.equal(await countProjectEvents(db, EMAIL, "bella"), 0);
+});
 
 test("a session's life is published as events on its project stream", async (t) => {
   const { db } = await seeded(t);

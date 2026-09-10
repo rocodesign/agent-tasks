@@ -23,7 +23,7 @@ src/
   auth.ts           email OTP, Resend send, API-key mint/hash, allowlist
   shell-jwt.ts      shell JWT verification against the shell JWKS
   db/
-    schema.ts       accounts / api_keys / verification / machines / sessions / tasks / dismissals
+    schema.ts       accounts / api_keys / verification / machines / machine_processes / sessions / tasks / dismissals / events
     client.ts       the ONLY driver touch point (swap to migrate vendors)
 ui/                 Vite + React + Tailwind dashboard -> builds to ui/dist
 drizzle/            SQLite migrations, applied with `wrangler d1 migrations apply`
@@ -35,16 +35,33 @@ drizzle/            SQLite migrations, applied with `wrangler d1 migrations appl
 |--------|------|------|---------|
 | POST | `/api/auth/request-otp` | no | Email a 6-digit code (allowlisted emails only) |
 | POST | `/api/auth/verify-otp` | no | Verify code → mint + return a per-account API key |
-| POST | `/api/ingest` | yes | Upsert machine+session, replace that session's tasks (full snapshot); returns `dismissed` |
-| POST | `/api/session/start` | yes | Register or resume a hook session |
-| POST | `/api/session/end` | yes | End a hook session |
-| POST | `/api/session/remove` | yes | Permanently remove a session |
-| POST | `/api/dismiss` | yes | User defers a task from the UI (persists across re-ingests) |
-| POST | `/api/task/complete` | yes | Mark a task done by name (`sessionId`, `taskName`) |
-| GET | `/api/dismissals` | yes | Un-acknowledged deferrals for a session |
-| GET | `/api/version` | yes | Durable Object version counter for the poller |
-| GET | `/api/tree` | yes | Full Machine → Session → Tasks hierarchy; `?project=` `?kind=` `?delegation=` `?machine=` |
-| GET | `/api/history/sessions` | yes | Summarized sessions from D1; same filters plus `?since=` `?all=1` `?limit=` |
+| GET | `/api/whoami` | read | The name, scopes and projects this credential is addressed by |
+| POST | `/api/ingest` | publish | Upsert machine+session, replace that session's tasks (full snapshot); returns `dismissed` |
+| POST | `/api/session/start` | publish | Register or resume a hook session |
+| POST | `/api/session/title` | publish | Early title from the first-prompt hook; a digest title outranks it |
+| POST | `/api/session/enrich` | publish | Post-session digest: title, summary, tags, decisions, follow-up tasks |
+| POST | `/api/session/digest-failed` | publish | The summarizer gave up; records the reason and the attempt count |
+| POST | `/api/session/end` | publish | End a hook session |
+| POST | `/api/session/remove` | publish | Permanently remove a session |
+| POST | `/api/dismiss` | publish | User defers a task from the UI (persists across re-ingests) |
+| POST | `/api/task/complete` | publish | Mark a task done by name (`sessionId`, `taskName`) |
+| GET | `/api/dismissals` | read | Un-acknowledged deferrals for a session |
+| GET | `/api/version` | read | Durable Object version counter for the poller |
+| GET | `/api/tree` | read | Machine → Session → Tasks hierarchy, with each machine's processes; `?project=` `?kind=` `?delegation=` `?machine=` |
+| GET | `/api/history/sessions` | read | Summarized sessions from D1 beside the digests that failed; same filters plus `?since=` `?all=1` `?limit=` |
+| POST | `/api/search` | read | AI Search over the knowledge bucket, narrowed to the credential's projects |
+| POST | `/api/events` | publish | Post one event on a project stream; `launch.cancelled` needs orchestrate |
+| GET | `/api/events` | read | Read a project or recipient stream from a cursor; `?project=` `?recipient=` `?launch=` `?after=` `?limit=` |
+| POST | `/api/launch` | orchestrate | Assign one launch: the prompt reaches R2, then `delegation.assigned` names it |
+| GET | `/api/launch/:id` | read | What became of one launch, derived from its events |
+| GET | `/api/launch/:id/prompt` | read | The prompt that launch was issued, as Markdown |
+| GET | `/api/delegations` | read | Delegations with their launches; `?state=open\|all` `?project=` |
+| POST | `/api/heartbeat` | publish | A machine process reports that it is alive and how often it will say so |
+| GET | `/api/machines` | read | Every machine's processes with their last beat and whether they are online |
+| GET | `/api/relay` | publish | A machine's Codex app server joins its own relay socket (the token names the machine) |
+| GET | `/api/relay/:machine` | read | The console opens a relay socket to that machine |
+| POST | `/api/project/purge` | orchestrate | Drop one project's sessions, events and objects; `dryRun` counts and removes nothing |
+| POST | `/api/drop-project` | orchestrate | The same drop, under the name the shell uses for it |
 | GET | `/health` | no | Health check |
 | GET | `*` | no | Static SPA |
 

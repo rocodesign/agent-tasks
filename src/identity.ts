@@ -8,6 +8,10 @@ export type FleetScope = (typeof FLEET_SCOPES)[number];
 
 export const SERVICE_PREFIX = "st_";
 
+// A machine name reaches a path, an event recipient and a heartbeat row, so it holds
+// nothing a path separator could reinterpret.
+export const MACHINE_SHAPE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
+
 const NEGATIVE_TTL_MS = 60_000;
 const MAX_TTL_MS = 60 * 60_000;
 const INTROSPECT_TIMEOUT_MS = 4000;

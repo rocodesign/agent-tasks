@@ -33,6 +33,7 @@ export type SessionMeta = {
   summarizedThrough: string | null;
   decisions: string[] | null;
   tags: string[] | null;
+  proposedTags: string[] | null;
   category: string | null;
 };
 
@@ -46,6 +47,7 @@ export const EMPTY_SESSION_META: SessionMeta = {
   summarizedThrough: null,
   decisions: null,
   tags: null,
+  proposedTags: null,
   category: null,
 };
 
@@ -68,7 +70,7 @@ export function pickSessionMeta(...sources: unknown[]): Partial<SessionMeta> {
   for (const key of META_KEYS) {
     const raw = firstValue(sources, key);
     if (raw === undefined || raw === null) continue;
-    if (key === "decisions" || key === "tags") {
+    if (key === "decisions" || key === "tags" || key === "proposedTags") {
       const list = stringList(raw);
       if (list) meta[key] = list;
       continue;
