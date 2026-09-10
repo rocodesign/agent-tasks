@@ -25,7 +25,7 @@ export class MachineRelay {
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-      return new Response(JSON.stringify({ error: "this route takes a websocket" }), {
+      return new Response(JSON.stringify({ error: "the relay object takes a websocket" }), {
         status: 426,
         headers: { "content-type": "application/json" },
       });
@@ -63,8 +63,13 @@ export class MachineRelay {
   webSocketMessage(socket: WebSocket, raw: string | ArrayBuffer): void {
     const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
     const tags = this.ctx.getTags(socket);
-    if (tags.includes("source")) return this.fromSource(text);
-    this.fromClient(socket, tags, text);
+    try {
+      if (tags.includes("source")) return this.fromSource(text);
+      this.fromClient(socket, tags, text);
+    } catch (error) {
+      // A throw here would close the socket with no word to whoever was waiting on it.
+      socket.send(errorFrame(null, -32003, `relay failed: ${String(error)} tags=${tags.join("|")}`));
+    }
   }
 
   webSocketClose(socket: WebSocket): void {
@@ -84,15 +89,33 @@ export class MachineRelay {
       socket.send(errorFrame(frame.id, frame.code, frame.message));
       return;
     }
-    const source = this.ctx.getWebSockets("source")[0];
-    if (!source) {
-      socket.send(errorFrame(frame.id, -32001, "the machine is not attached"));
-      return;
-    }
     const tag = tags.find((entry) => entry !== "client") ?? "";
-    source.send(
-      JSON.stringify({ jsonrpc: "2.0", id: packId(tag, frame.id), method: frame.method, params: frame.params }),
-    );
+    const outgoing = JSON.stringify({
+      jsonrpc: "2.0",
+      id: packId(tag, frame.id),
+      method: frame.method,
+      params: frame.params,
+    });
+    // A deputy that died without a close frame stays in the list and throws on send. Trying
+    // each one and dropping the ones that refuse keeps a stale socket from swallowing every
+    // call until the object forgets it.
+    if (!this.toSource(outgoing)) socket.send(errorFrame(frame.id, -32001, "the machine is not attached"));
+  }
+
+  private toSource(text: string): boolean {
+    for (const source of this.ctx.getWebSockets("source")) {
+      try {
+        source.send(text);
+        return true;
+      } catch {
+        try {
+          source.close(1011, "the socket would not take a frame");
+        } catch {
+          // Already gone. Nothing to close and nothing to report.
+        }
+      }
+    }
+    return false;
   }
 
   private fromSource(text: string): void {

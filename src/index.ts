@@ -206,6 +206,8 @@ async function relay(c: Context<{ Bindings: Bindings }>, asked: string | null) {
   // The handshake must stay the request the runtime built. Upgrade and Sec-WebSocket-Key
   // are forbidden header names, so copying the fields into a fresh Request loses them.
   const forwarded = new Request(c.req.raw);
+  forwarded.headers.set("upgrade", "websocket");
+  forwarded.headers.set("connection", "Upgrade");
   forwarded.headers.set("x-relay-role", role);
   forwarded.headers.set("x-relay-machine", machine);
   forwarded.headers.set("x-relay-scopes", identity.scopes.join(","));
