@@ -17,6 +17,10 @@ import {
   publishEvent,
 } from "./events.ts";
 import { assignLaunch, LaunchConflict, MAX_PROMPT, readLaunchPrompt } from "./launch.ts";
+import { MachineRelay } from "./machine-relay.ts";
+import { relayRole } from "./relay.ts";
+
+const MACHINE_SHAPE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/;
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -173,13 +177,45 @@ app.get("/api/events", async (c) => {
   }
 });
 
+// The console reaches a machine's Codex app server through this socket. Fleet carries the
+// frames and stores none of them: a thread and its transcript live on the machine.
+app.get("/api/relay/:machine", async (c) => {
+  const machine = c.req.param("machine");
+  if (!MACHINE_SHAPE.test(machine)) return c.json({ error: "that is not a machine name" }, 400);
+  const role = relayRole(c.req.query("role"));
+  const identity = await identify(c, role === "source" ? "publish" : "read");
+  if (identity instanceof Response) return identity;
+  // A deputy offers one machine: the one its own token was minted for. A person's token
+  // names no machine, so nobody can pose as a deputy through the browser.
+  if (role === "source" && identity.machine !== machine) {
+    return c.json({ error: "a deputy may only attach as its own machine" }, 403);
+  }
+  // The relay is addressed by machine, and the app server has no idea what a project is,
+  // so a narrowed credential cannot be held to its list once a frame is through.
+  if (role === "client" && identity.projects !== null) {
+    return c.json({ error: "a project-scoped credential cannot open a machine relay" }, 403);
+  }
+  if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
+    return c.json({ error: "this route takes a websocket" }, 426);
+  }
+
+  const object = c.env.RELAY.get(c.env.RELAY.idFromName(`${identity.email}::${machine}`));
+  // The handshake must stay the request the runtime built. Upgrade and Sec-WebSocket-Key
+  // are forbidden header names, so copying the fields into a fresh Request loses them.
+  const forwarded = new Request(c.req.raw);
+  forwarded.headers.set("x-relay-role", role);
+  forwarded.headers.set("x-relay-machine", machine);
+  forwarded.headers.set("x-relay-scopes", identity.scopes.join(","));
+  return object.fetch(forwarded);
+});
+
 app.all("/api/*", (c) => {
   const object = c.env.LIVE_STATE.get(c.env.LIVE_STATE.idFromName("fleet"));
   return object.fetch(c.req.raw);
 });
 app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
-export { LiveState };
+export { LiveState, MachineRelay };
 export default {
   fetch: app.fetch,
   // Cron: reap silent sessions (Codex never fires SessionEnd), prune the live tree,

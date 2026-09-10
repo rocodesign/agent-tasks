@@ -56,6 +56,7 @@ export type Bindings = {
   AI: Ai;
   AI_SEARCH?: string;
   LIVE_STATE: DurableObjectNamespace;
+  RELAY: DurableObjectNamespace;
   ASSETS: Fetcher;
 };
 
