@@ -39,6 +39,21 @@ const POSTABLE = [...POST_TYPES, ...DEPUTY_TYPES, ...ORCHESTRATOR_TYPES] as read
 
 app.use("/api/*", cors());
 app.get("/health", (c) => c.json({ ok: true }));
+
+// A caller cannot otherwise learn the name Fleet addresses it by. A machine reports itself
+// by hostname while its token names it something else, and work sent to the token name
+// then reaches nobody, with no error anywhere to say so.
+app.get("/api/whoami", async (c) => {
+  const identity = await identify(c, "read");
+  if (identity instanceof Response) return identity;
+  return c.json({
+    email: identity.email,
+    subject: identity.subject,
+    machine: identity.machine,
+    scopes: identity.scopes,
+    projects: identity.projects,
+  });
+});
 // Search runs outside the Durable Object: the object serializes every request, and a
 // retrieval call would block session writes for its whole duration.
 app.post("/api/search", async (c) => {
