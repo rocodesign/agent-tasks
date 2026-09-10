@@ -179,17 +179,20 @@ app.get("/api/events", async (c) => {
 
 // The console reaches a machine's Codex app server through this socket. Fleet carries the
 // frames and stores none of them: a thread and its transcript live on the machine.
-app.get("/api/relay/:machine", async (c) => {
-  const machine = c.req.param("machine");
-  if (!MACHINE_SHAPE.test(machine)) return c.json({ error: "that is not a machine name" }, 400);
+async function relay(c: Context<{ Bindings: Bindings }>, asked: string | null) {
   const role = relayRole(c.req.query("role"));
   const identity = await identify(c, role === "source" ? "publish" : "read");
   if (identity instanceof Response) return identity;
-  // A deputy offers one machine: the one its own token was minted for. A person's token
-  // names no machine, so nobody can pose as a deputy through the browser.
-  if (role === "source" && identity.machine !== machine) {
-    return c.json({ error: "a deputy may only attach as its own machine" }, 403);
+
+  // A deputy never names its own machine. Its token already does, and a name in the path
+  // could only ever disagree with it. A person's token names no machine, so nobody can
+  // pose as a deputy from the browser.
+  const machine = role === "source" ? identity.machine : asked;
+  if (!machine) {
+    return c.json({ error: role === "source" ? "this token names no machine" : "name a machine" }, 403);
   }
+  if (!MACHINE_SHAPE.test(machine)) return c.json({ error: "that is not a machine name" }, 400);
+
   // The relay is addressed by machine, and the app server has no idea what a project is,
   // so a narrowed credential cannot be held to its list once a frame is through.
   if (role === "client" && identity.projects !== null) {
@@ -207,7 +210,10 @@ app.get("/api/relay/:machine", async (c) => {
   forwarded.headers.set("x-relay-machine", machine);
   forwarded.headers.set("x-relay-scopes", identity.scopes.join(","));
   return object.fetch(forwarded);
-});
+}
+
+app.get("/api/relay", (c) => relay(c, null));
+app.get("/api/relay/:machine", (c) => relay(c, c.req.param("machine")));
 
 app.all("/api/*", (c) => {
   const object = c.env.LIVE_STATE.get(c.env.LIVE_STATE.idFromName("fleet"));
