@@ -13,6 +13,7 @@ import {
   namespaced,
   purgeOldEndedSessions,
   purgeProject,
+  readSessionTitle,
   reapStaleSessions,
   removeSession,
   startSession,
@@ -123,10 +124,15 @@ const STATE_KEY = "fleet-state-v1";
 const ARCHIVE_INTERVAL_MS = 60 * 60_000;
 
 export class LiveState {
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Bindings,
-  ) {}
+  private readonly ctx: DurableObjectState;
+  private readonly env: Bindings;
+
+  // Plain fields rather than constructor parameter properties: the tests import this
+  // module under Node's strip-only TypeScript loader, which rejects those.
+  constructor(ctx: DurableObjectState, env: Bindings) {
+    this.ctx = ctx;
+    this.env = env;
+  }
 
   async fetch(request: Request): Promise<Response> {
     return this.ctx.blockConcurrencyWhile(async () => {
@@ -188,6 +194,7 @@ export class LiveState {
       if (!reaches(body?.session)) return denied();
       const result = ingestLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
+      await backfillTitle(account, result.sessionId, this.titleReader(email));
       queue(state, {
         id: `ingest:${email}:${String(body?.session?.id)}`,
         kind: "ingest",
@@ -202,9 +209,10 @@ export class LiveState {
       if (!reaches(body)) return denied();
       const result = startLive(account, email, body);
       if ("error" in result) return json({ error: result.error }, 400);
+      const title = await backfillTitle(account, result.sessionId, this.titleReader(email));
       queue(state, { id: `start:${email}:${result.sessionId}`, kind: "start", email, body });
       await this.changed(state);
-      return json({ ok: true, ...result });
+      return json({ ok: true, ...result, title });
     }
     if (path === "/api/session/end" && request.method === "POST") {
       const body: any = await request.json().catch(() => ({}));
@@ -523,6 +531,10 @@ export class LiveState {
     return this.ctx.storage.put(STATE_KEY, state);
   }
 
+  private titleReader(email: string) {
+    return (sessionId: string) => readSessionTitle(createDb(this.env.DB), email, sessionId);
+  }
+
   private async flushArchive(state: DurableState): Promise<void> {
     const events = Object.values(state.archive).sort((a, b) => a.queuedAt - b.queuedAt);
     if (!events.length) return;
@@ -574,7 +586,7 @@ function removeQueuedSessionEvents(state: DurableState, email: string, sessionId
   }
 }
 
-function ingestLive(account: DurableState["accounts"][string], email: string, body: any) {
+export function ingestLive(account: DurableState["accounts"][string], email: string, body: any) {
   const machine = body?.machine;
   const session = body?.session;
   if (!machine?.id || !machine?.hostname || !session?.id) {
@@ -636,7 +648,7 @@ function ingestLive(account: DurableState["accounts"][string], email: string, bo
   return { tasks: tasks.length, dismissed: tasks.filter((task) => task.status === "deferred").map((task) => task.name), machineId, sessionId };
 }
 
-function startLive(account: DurableState["accounts"][string], email: string, body: any) {
+export function startLive(account: DurableState["accounts"][string], email: string, body: any) {
   const rawMachineId = String(body?.machineId ?? body?.machine?.id ?? "");
   const hostname = String(body?.hostname ?? body?.machine?.hostname ?? rawMachineId);
   const rawSessionId = String(body?.sessionId ?? body?.session?.id ?? "");
@@ -674,6 +686,29 @@ function startLive(account: DurableState["accounts"][string], email: string, bod
   };
   account.version = Date.now();
   return { machineId, sessionId };
+}
+
+// A resumed session keeps its id but finds no live card: pruneLive drops the card an
+// hour after the session ended. The durable row still holds the title, so read it back
+// instead of showing the card untitled.
+export async function backfillTitle(
+  account: DurableState["accounts"][string],
+  sessionId: string,
+  read: (sessionId: string) => Promise<string | null>,
+): Promise<string | null> {
+  const session = findSession(account, sessionId);
+  if (!session) return null;
+  if (session.title) return session.title;
+  try {
+    const title = await read(sessionId);
+    if (title) {
+      session.title = title;
+      session.updatedAt = new Date().toISOString();
+    }
+  } catch (error) {
+    console.error("[title] backfill failed", error);
+  }
+  return session.title;
 }
 
 function endLive(account: DurableState["accounts"][string], email: string, body: any) {
@@ -837,7 +872,7 @@ function pruneLive(state: DurableState) {
   return { reapedLive, droppedLive };
 }
 
-function buildLiveTree(
+export function buildLiveTree(
   account: DurableState["accounts"][string],
   email: string,
   filters: SessionFilters,

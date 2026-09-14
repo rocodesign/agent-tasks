@@ -484,6 +484,15 @@ async function eventSubject(db: DB, email: string, sessionId: string): Promise<E
   return rows[0] ?? null;
 }
 
+export async function readSessionTitle(db: DB, email: string, sessionId: string): Promise<string | null> {
+  const rows = await db
+    .select({ title: sessions.title })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email)))
+    .limit(1);
+  return rows[0]?.title ?? null;
+}
+
 // Short, stable discriminator so a repeated report is one event, not many.
 function keyOf(value: string): string {
   let hash = 5381;
