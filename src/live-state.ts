@@ -644,6 +644,7 @@ export function ingestLive(account: DurableState["accounts"][string], email: str
     updatedAt: now,
     tasks,
   };
+  touchLiveParent(account, sessionId);
   account.version = Date.now();
   return { tasks: tasks.length, dismissed: tasks.filter((task) => task.status === "deferred").map((task) => task.name), machineId, sessionId };
 }
@@ -684,6 +685,7 @@ export function startLive(account: DurableState["accounts"][string], email: stri
     updatedAt: now,
     tasks: previous?.tasks ?? [],
   };
+  touchLiveParent(account, sessionId);
   account.version = Date.now();
   return { machineId, sessionId };
 }
@@ -829,6 +831,23 @@ function removeLive(account: DurableState["accounts"][string], sessionId: string
     }
   }
   account.version = Date.now();
+}
+
+// A parent waiting on its subagents reports nothing of its own for a long time, so
+// pruneLive would end it under its running children. Activity on a subagent is activity
+// on the parent. A parent its own SessionEnd hook ended stays ended: that end is real.
+function touchLiveParent(account: DurableState["accounts"][string], sessionId: string): void {
+  const { parentSessionId } = sessionRelation(sessionId);
+  if (!parentSessionId) return;
+  const parent = findSession(account, parentSessionId);
+  if (!parent) return;
+  const now = new Date().toISOString();
+  parent.lastActivityAt = now;
+  parent.updatedAt = now;
+  if (parent.status === "ended" && parent.endedReason === "reaper") {
+    parent.status = "active";
+    parent.endedReason = null;
+  }
 }
 
 function findSession(account: DurableState["accounts"][string], sessionId: string): LiveSession | undefined {

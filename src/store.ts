@@ -1,4 +1,4 @@
-import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray, inArray } from "drizzle-orm";
+import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray, inArray, sql } from "drizzle-orm";
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
 import { HISTORY_HIDDEN_KINDS, reachableSession, type SessionFilters } from "./session-filters.ts";
@@ -76,6 +76,8 @@ export async function ingestSnapshot(db: DB, email: string, body: any): Promise<
         ...meta,
       },
     });
+
+  await touchParent(db, email, sessionId);
 
   // User dismissals persist across re-ingests.
   const dismissalRows = await db
@@ -426,6 +428,25 @@ const REAP_AFTER_MS = 45 * 60_000;
 // tasks + dismissals).
 const PURGE_ENDED_AFTER_MS = 30 * 24 * 60 * 60_000;
 
+// A parent waiting on its subagents reports nothing of its own for a long time, so the
+// reaper would end it under its running children. Activity on a subagent is activity on
+// the parent. A parent its own SessionEnd hook ended stays ended: that end is real.
+async function touchParent(db: DB, email: string, sessionId: string): Promise<void> {
+  const { parentSessionId } = sessionRelation(sessionId);
+  if (!parentSessionId) return;
+  const now = new Date();
+  const reaped = sql`${sessions.endedReason} = 'reaper'`;
+  await db
+    .update(sessions)
+    .set({
+      status: sql`case when ${reaped} then 'active' else ${sessions.status} end`,
+      endedReason: sql`case when ${reaped} then null else ${sessions.endedReason} end`,
+      lastActivityAt: now,
+      updatedAt: now,
+    })
+    .where(and(eq(sessions.id, parentSessionId), eq(sessions.accountEmail, email)));
+}
+
 export async function reapStaleSessions(db: DB): Promise<{ ended: number }> {
   const cutoff = new Date(Date.now() - REAP_AFTER_MS);
   const rows = await db
@@ -663,6 +684,8 @@ export async function startSession(
         ...(p.meta ?? {}),
       },
     });
+
+  await touchParent(db, email, sessionId);
 
   const subject = await eventSubject(db, email, sessionId);
   if (subject) {

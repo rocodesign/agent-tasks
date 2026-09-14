@@ -288,6 +288,65 @@ test("refuses to complete a task on a session from another account", async (t) =
   assert.equal(row.status, "pending");
 });
 
+test("a subagent event keeps its parent out of the reaper's reach", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1" });
+  const stale = new Date(Date.now() - 60 * 60_000);
+  await db.update(sessions).set({ lastActivityAt: stale, updatedAt: stale }).where(eq(sessions.id, `${EMAIL}::s1`));
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1:agent:a1" });
+
+  assert.deepEqual(await reapStaleSessions(db), { ended: 0 });
+  const [parent] = await db.select().from(sessions).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.ok(parent.lastActivityAt.getTime() > stale.getTime());
+});
+
+test("a subagent snapshot revives a parent the reaper ended", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1" });
+  const stale = new Date(Date.now() - 60 * 60_000);
+  await db.update(sessions).set({ lastActivityAt: stale, updatedAt: stale }).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.deepEqual(await reapStaleSessions(db), { ended: 1 });
+
+  await ingestSnapshot(db, EMAIL, {
+    machine: { id: "box", hostname: "box" },
+    session: { id: "s1:agent:a1" },
+    tasks: [{ name: "read the transcript" }],
+  });
+
+  const [parent] = await db.select().from(sessions).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.equal(parent.status, "active");
+  assert.equal(parent.endedReason, null);
+});
+
+test("a subagent event leaves a parent its own hook ended alone", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1" });
+  await endSession(db, EMAIL, "s1");
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "s1:agent:a1" });
+
+  const [parent] = await db.select().from(sessions).where(eq(sessions.id, `${EMAIL}::s1`));
+  assert.equal(parent.status, "ended");
+  assert.equal(parent.endedReason, "hook");
+});
+
+test("a subagent with no parent row starts on its own", async (t) => {
+  const { db, miniflare } = await seeded();
+  t.after(() => miniflare.dispose());
+
+  await startSession(db, EMAIL, { machineId: "box", hostname: "box", sessionId: "ghost:agent:a1" });
+
+  const rows = await db.select({ id: sessions.id }).from(sessions);
+  assert.deepEqual(rows.map((row) => row.id), [`${EMAIL}::ghost:agent:a1`]);
+});
+
 test("purges only ended rows that no summarizer ever reached", async (t) => {
   const { db, miniflare } = await seeded();
   t.after(() => miniflare.dispose());
