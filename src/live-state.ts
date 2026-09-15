@@ -37,8 +37,9 @@ import {
 } from "./auth.ts";
 import { hasScope, resolveIdentity } from "./identity.ts";
 import { deleteSessionKnowledge, projectSlug, writeSessionKnowledge } from "./knowledge.ts";
-import { expireStaleLaunches, purgeOldEvents } from "./events.ts";
+import { expireStaleLaunches, purgeOldEvents, type EventInput } from "./events.ts";
 import { processesByMachine, type ProcessStatus } from "./processes.ts";
+import { eventNote, eventsFrame, helloFrame, nudgeMachine, treeFrame, type EventNote } from "./notify.ts";
 import {
   matchesMachineFilter,
   matchesSessionFilters,
@@ -137,7 +138,9 @@ export class LiveState {
   async fetch(request: Request): Promise<Response> {
     return this.ctx.blockConcurrencyWhile(async () => {
       const state = await this.load();
+      const before = accountVersions(state);
       const response = await this.route(request, state);
+      this.announceTree(state, before);
       return response;
     });
   }
@@ -145,9 +148,15 @@ export class LiveState {
   async alarm(): Promise<void> {
     await this.ctx.blockConcurrencyWhile(async () => {
       const state = await this.load();
+      const before = accountVersions(state);
       await this.flushArchive(state);
+      this.announceTree(state, before);
     });
   }
+
+  // A watcher sends nothing. Ignoring a frame rather than throwing keeps a stray one from
+  // closing a socket the browser is relying on.
+  webSocketMessage(): void {}
 
   private async route(request: Request, state: DurableState): Promise<Response> {
     const url = new URL(request.url);
@@ -160,10 +169,22 @@ export class LiveState {
       return this.verifyOtp(request, state);
     }
 
-    // Cron-only entry point: the public worker forwards nothing but /api/*, so this
-    // path is unreachable from outside and needs no bearer key.
+    // Internal entry points: the public worker forwards nothing but /api/*, so these
+    // paths are unreachable from outside and need no bearer key.
     if (path === "/internal/maintenance" && request.method === "POST") {
       return this.maintenance(state);
+    }
+    if (path === "/internal/notify" && request.method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      const email = String(body?.email ?? "");
+      if (email) this.send(email, eventsFrame(readNote(body)));
+      return json({ ok: true });
+    }
+
+    // The worker proved the identity and named the account in the header. A GET is answered
+    // there before the /api/* forward, so this path arrives from nowhere else.
+    if (path === "/api/watch" && request.method === "GET") {
+      return this.watch(request, state);
     }
 
     const actor = await this.resolveActor(request, state);
@@ -497,6 +518,7 @@ export class LiveState {
   // Postgres accumulate "active" sessions forever.
   private async maintenance(state: DurableState): Promise<Response> {
     const pruned = pruneLive(state);
+    const written: EventInput[] = [];
     let reaped = 0;
     let purged = 0;
     let expired = 0;
@@ -506,14 +528,53 @@ export class LiveState {
       purged = (await purgeOldEndedSessions(db)).removed;
       // Before the retention pass: an assignment removed with the old events would leave
       // its launch with no outcome at all.
-      expired = (await expireStaleLaunches(db)).expired;
+      expired = (await expireStaleLaunches(db, (event) => written.push(event))).expired;
       await purgeOldEvents(db);
     } catch (error) {
       // Postgres maintenance is retried by the next cron; live pruning already ran.
       console.error("[maintenance] postgres pass failed", error);
     }
+    await this.announceEvents(written);
     await this.flushArchive(state);
     return json({ ok: true, ...pruned, reaped, purged, expired });
+  }
+
+  private watch(request: Request, state: DurableState): Response {
+    const email = request.headers.get("x-watch-email") ?? "";
+    if (!email) return json({ error: "unauthorized" }, 401);
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return json({ error: "this route takes a websocket" }, 426);
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    this.ctx.acceptWebSocket(server, ["watch", `watch:${email}`]);
+    server.send(helloFrame(state.accounts[email]?.version ?? 0));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private send(email: string, frame: string): void {
+    for (const socket of this.ctx.getWebSockets(`watch:${email}`)) {
+      try {
+        socket.send(frame);
+      } catch {
+        // A socket the runtime has not yet forgotten refuses the frame. The rest still get it.
+      }
+    }
+  }
+
+  private announceTree(state: DurableState, before: Record<string, number>): void {
+    for (const [email, account] of Object.entries(state.accounts)) {
+      if (before[email] === account.version) continue;
+      this.send(email, treeFrame(account.version));
+    }
+  }
+
+  private async announceEvents(written: EventInput[]): Promise<void> {
+    for (const event of written) {
+      const note = eventNote(event);
+      this.send(event.accountEmail, eventsFrame(note));
+      for (const recipient of note.recipients) await nudgeMachine(this.env, event.accountEmail, recipient);
+    }
   }
 
   private async changed(state: DurableState): Promise<void> {
@@ -538,13 +599,14 @@ export class LiveState {
   private async flushArchive(state: DurableState): Promise<void> {
     const events = Object.values(state.archive).sort((a, b) => a.queuedAt - b.queuedAt);
     if (!events.length) return;
+    const written: EventInput[] = [];
     try {
       const db = createDb(this.env.DB);
       for (const email of new Set(events.map((event) => event.email))) {
         await db.insert(accounts).values({ email }).onConflictDoNothing();
       }
       for (const event of events) {
-        await archiveEvent(db, event, this.env);
+        await archiveEvent(db, event, this.env, (input) => written.push(input));
         delete state.archive[event.id];
       }
     } catch (error) {
@@ -554,8 +616,21 @@ export class LiveState {
       if (Object.keys(state.archive).length) {
         await this.ctx.storage.setAlarm(Date.now() + ARCHIVE_INTERVAL_MS);
       }
+      await this.announceEvents(written);
     }
   }
+}
+
+function accountVersions(state: DurableState): Record<string, number> {
+  return Object.fromEntries(Object.entries(state.accounts).map(([email, account]) => [email, account.version]));
+}
+
+function readNote(body: any): EventNote {
+  return {
+    project: String(body?.project ?? "unknown"),
+    delegation: typeof body?.delegation === "string" && body.delegation ? body.delegation : null,
+    recipients: Array.isArray(body?.recipients) ? body.recipients.map(String) : [],
+  };
 }
 
 function emptyState(): DurableState {
@@ -918,23 +993,33 @@ export function buildLiveTree(
     .filter((machine) => machine.sessions.length > 0);
 }
 
-async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent, env: Bindings): Promise<void> {
+async function archiveEvent(
+  db: ReturnType<typeof createDb>,
+  event: ArchiveEvent,
+  env: Bindings,
+  notify: (input: EventInput) => void,
+): Promise<void> {
   switch (event.kind) {
     case "api-key":
       await db.insert(apiKeys).values({ ...event.body, email: event.email }).onConflictDoNothing();
       break;
     case "start":
-      await startSession(db, event.email, {
-        machineId: String(event.body?.machineId ?? event.body?.machine?.id ?? ""),
-        hostname: String(event.body?.hostname ?? event.body?.machine?.hostname ?? event.body?.machineId ?? ""),
-        os: event.body?.os ?? event.body?.machine?.os ?? null,
-        label: event.body?.label ?? event.body?.machine?.label ?? null,
-        sessionId: String(event.body?.sessionId ?? event.body?.session?.id ?? ""),
-        project: event.body?.project ?? event.body?.session?.project ?? null,
-        title: event.body?.title ?? event.body?.session?.title ?? null,
-        provider: event.body?.provider ?? event.body?.session?.provider ?? null,
-        meta: pickSessionMeta(event.body, event.body?.session),
-      });
+      await startSession(
+        db,
+        event.email,
+        {
+          machineId: String(event.body?.machineId ?? event.body?.machine?.id ?? ""),
+          hostname: String(event.body?.hostname ?? event.body?.machine?.hostname ?? event.body?.machineId ?? ""),
+          os: event.body?.os ?? event.body?.machine?.os ?? null,
+          label: event.body?.label ?? event.body?.machine?.label ?? null,
+          sessionId: String(event.body?.sessionId ?? event.body?.session?.id ?? ""),
+          project: event.body?.project ?? event.body?.session?.project ?? null,
+          title: event.body?.title ?? event.body?.session?.title ?? null,
+          provider: event.body?.provider ?? event.body?.session?.provider ?? null,
+          meta: pickSessionMeta(event.body, event.body?.session),
+        },
+        notify,
+      );
       break;
     case "ingest":
       await ingestSnapshot(db, event.email, event.body);
@@ -943,13 +1028,19 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
       await dismissTask(db, event.email, String(event.body.sessionId), String(event.body.taskName));
       break;
     case "complete":
-      await completeTask(db, event.email, String(event.body.sessionId), String(event.body.taskName));
+      await completeTask(db, event.email, String(event.body.sessionId), String(event.body.taskName), notify);
       break;
     case "end":
       if (event.body?.sessionId) {
-        await endSession(db, event.email, String(event.body.sessionId), String(event.body?.reason ?? "hook"));
+        await endSession(db, event.email, String(event.body.sessionId), String(event.body?.reason ?? "hook"), notify);
       } else {
-        await endLatestSession(db, event.email, String(event.body?.machineId ?? event.body?.machine?.id ?? ""), String(event.body?.reason ?? "hook"));
+        await endLatestSession(
+          db,
+          event.email,
+          String(event.body?.machineId ?? event.body?.machine?.id ?? ""),
+          String(event.body?.reason ?? "hook"),
+          notify,
+        );
       }
       break;
     case "remove":
@@ -957,14 +1048,14 @@ async function archiveEvent(db: ReturnType<typeof createDb>, event: ArchiveEvent
       await removeSession(db, event.email, String(event.body.sessionId));
       break;
     case "enrich": {
-      const enriched = await enrichSession(db, event.email, event.body);
+      const enriched = await enrichSession(db, event.email, event.body, notify);
       if (enriched.enriched && env.KNOWLEDGE) {
         await writeSessionKnowledge(db, env.KNOWLEDGE, event.email, enriched.enriched, event.body);
       }
       break;
     }
     case "title":
-      await titleSession(db, event.email, event.body);
+      await titleSession(db, event.email, event.body, notify);
       break;
   }
 }

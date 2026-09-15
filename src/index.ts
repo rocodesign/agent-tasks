@@ -28,6 +28,7 @@ import { listMachines, readHeartbeat, recordHeartbeat } from "./processes.ts";
 import { markDigestFailed } from "./store.ts";
 import { MachineRelay } from "./machine-relay.ts";
 import { relayRole } from "./relay.ts";
+import { eventNote, notifyEvent } from "./notify.ts";
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -39,6 +40,14 @@ async function identify(c: Context<{ Bindings: Bindings }>, scope: FleetScope): 
   if (!identity) return c.json({ error: "unauthorized" }, 401);
   if (!hasScope(identity, scope)) return c.json({ error: `this call needs the fleet ${scope} scope` }, 403);
   return identity;
+}
+// A notification must never fail or delay the write it describes.
+function later(c: Context<{ Bindings: Bindings }>, work: Promise<unknown>): void {
+  try {
+    c.executionCtx.waitUntil(work);
+  } catch {
+    // A caller that built no execution context: the work still runs, unawaited.
+  }
 }
 app.use("/api/*", cors());
 app.get("/health", (c) => c.json({ ok: true }));
@@ -104,21 +113,23 @@ app.post("/api/events", async (c) => {
     if (age === null) return c.json({ error: "no such assignment" }, 404);
     if (age > CLAIM_WINDOW_MS) return c.json({ error: "the assignment expired" }, 409);
   }
+  const input = {
+    accountEmail: identity.email,
+    project,
+    type,
+    producer,
+    eventKey,
+    sessionId: body?.sessionId ?? null,
+    delegation: body?.delegation ?? null,
+    machineId: body?.machineId ?? null,
+    recipient: body?.recipient ?? null,
+    launch: body?.launch ?? null,
+    replyTo: Number.isFinite(Number(body?.replyTo)) ? Math.trunc(Number(body.replyTo)) : null,
+    body: text,
+  };
   try {
-    const result = await publishEvent(db, {
-      accountEmail: identity.email,
-      project,
-      type,
-      producer,
-      eventKey,
-      sessionId: body?.sessionId ?? null,
-      delegation: body?.delegation ?? null,
-      machineId: body?.machineId ?? null,
-      recipient: body?.recipient ?? null,
-      launch: body?.launch ?? null,
-      replyTo: Number.isFinite(Number(body?.replyTo)) ? Math.trunc(Number(body.replyTo)) : null,
-      body: text,
-    });
+    const result = await publishEvent(db, input);
+    later(c, notifyEvent(c.env, identity.email, eventNote(input)));
     return c.json(result, result.duplicate ? 200 : 201);
   } catch (error: any) {
     return c.json({ error: "publish_failed", detail: String(error?.message ?? error), retryable: true }, 503);
@@ -142,7 +153,8 @@ app.post("/api/launch", async (c) => {
     return c.json({ error: `this credential cannot assign work in the project ${project}` }, 403);
   }
   if (prompt.length > MAX_PROMPT) return c.json({ error: "prompt too large" }, 413);
-  const problem = delegationProblem(body?.delegation ?? null);
+  const delegation = body?.delegation ?? null;
+  const problem = delegationProblem(delegation);
   if (problem) return c.json({ error: "invalid delegation id", detail: problem }, 400);
   try {
     const result = await assignLaunch(createDb(c.env.DB), c.env.KNOWLEDGE, identity.email, {
@@ -150,9 +162,10 @@ app.post("/api/launch", async (c) => {
       project,
       machine,
       prompt,
-      delegation: body?.delegation ?? null,
+      delegation,
       cwd: body?.cwd ?? null,
     });
+    later(c, notifyEvent(c.env, identity.email, eventNote({ project, delegation, recipient: machine })));
     return c.json(result, result.duplicate ? 200 : 201);
   } catch (error: any) {
     if (error instanceof LaunchConflict) return c.json({ error: error.message }, error.status as 400 | 409 | 413);
@@ -312,6 +325,25 @@ async function relay(c: Context<{ Bindings: Bindings }>, asked: string | null) {
 
 app.get("/api/relay", (c) => relay(c, null));
 app.get("/api/relay/:machine", (c) => relay(c, c.req.param("machine")));
+
+// The browser's live channel: the tree version and the event stream arrive on it instead
+// of being polled for. Identity is proven here and the object is handed the e-mail alone,
+// exactly as the machine relay is handed its machine.
+app.get("/api/watch", async (c) => {
+  const identity = await identify(c, "read");
+  if (identity instanceof Response) return identity;
+  if (c.req.header("upgrade")?.toLowerCase() !== "websocket") {
+    return c.json({ error: "this route takes a websocket" }, 426);
+  }
+  const object = c.env.LIVE_STATE.get(c.env.LIVE_STATE.idFromName("fleet"));
+  // The handshake must stay the request the runtime built. Upgrade and Sec-WebSocket-Key
+  // are forbidden header names, so copying the fields into a fresh Request loses them.
+  const forwarded = new Request(c.req.raw);
+  forwarded.headers.set("upgrade", "websocket");
+  forwarded.headers.set("connection", "Upgrade");
+  forwarded.headers.set("x-watch-email", identity.email);
+  return object.fetch(forwarded);
+});
 
 app.all("/api/*", (c) => {
   const object = c.env.LIVE_STATE.get(c.env.LIVE_STATE.idFromName("fleet"));

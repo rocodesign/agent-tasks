@@ -2,7 +2,14 @@ import { eq, ne, and, or, asc, desc, gte, lt, max, isNull, isNotNull, notInArray
 import type { DB } from "./db/client.ts";
 import { machines, sessions, tasks, dismissals } from "./db/schema.ts";
 import { HISTORY_HIDDEN_KINDS, reachableSession, type SessionFilters } from "./session-filters.ts";
-import { countProjectEvents, insertEvent, launchIdsForProject, purgeProjectEvents, systemEvent } from "./events.ts";
+import {
+  countProjectEvents,
+  insertEvent,
+  launchIdsForProject,
+  purgeProjectEvents,
+  systemEvent,
+  type EventSink,
+} from "./events.ts";
 import { projectSlug } from "./knowledge.ts";
 import { launchPromptKey } from "./launch.ts";
 import { normalizeProvider, pickSessionMeta, sessionRelation, type SessionMeta } from "./session-metadata.ts";
@@ -328,6 +335,7 @@ export async function completeTask(
   email: string,
   sessionId: string,
   taskName: string,
+  notify?: EventSink,
 ): Promise<{ error?: string }> {
   const id = namespaced(email, sessionId);
   const owns = await db
@@ -337,13 +345,15 @@ export async function completeTask(
     .limit(1);
   if (!owns.length) return { error: "not_found" };
   const subject = await eventSubject(db, email, id);
+  const event = systemEvent(subject!, "task.completed", `A follow-up task was completed: ${taskName}`, keyOf(taskName));
   await db.batch([
     db
       .update(tasks)
       .set({ status: "completed", updatedAt: new Date() })
       .where(and(eq(tasks.accountEmail, email), eq(tasks.sessionId, id), eq(tasks.name, taskName))),
-    insertEvent(db, systemEvent(subject!, "task.completed", `A follow-up task was completed: ${taskName}`, keyOf(taskName))),
+    insertEvent(db, event),
   ] as any);
+  notify?.(event);
   return {};
 }
 
@@ -383,17 +393,20 @@ export async function endSession(
   email: string,
   rawSessionId: string,
   reason: string = "hook",
+  notify?: EventSink,
 ): Promise<{ error?: string }> {
   const sessionId = `${email}::${rawSessionId}`;
   const subject = await eventSubject(db, email, sessionId);
   if (!subject) return {};
+  const event = systemEvent(subject, "session.ended", `The session ended (${reason}).`);
   await db.batch([
     db
       .update(sessions)
       .set({ status: "ended", endedReason: reason, updatedAt: new Date() })
       .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email))),
-    insertEvent(db, systemEvent(subject, "session.ended", `The session ended (${reason}).`)),
+    insertEvent(db, event),
   ] as any);
+  notify?.(event);
   return {};
 }
 
@@ -404,6 +417,7 @@ export async function endLatestSession(
   email: string,
   rawMachineId: string,
   reason: string = "hook",
+  notify?: EventSink,
 ): Promise<{ ended: string | null }> {
   const machineId = `${email}::${rawMachineId}`;
   const rows = await db
@@ -413,7 +427,7 @@ export async function endLatestSession(
     .orderBy(desc(sessions.lastActivityAt))
     .limit(1);
   if (!rows.length) return { ended: null };
-  await endSession(db, email, stripAccountPrefix(email, rows[0].id), reason);
+  await endSession(db, email, stripAccountPrefix(email, rows[0].id), reason, notify);
   return { ended: rows[0].id };
 }
 
@@ -525,6 +539,7 @@ export async function titleSession(
   db: DB,
   email: string,
   body: any,
+  notify?: EventSink,
 ): Promise<{ error?: string; titled?: string }> {
   const rawSessionId = String(body?.sessionId ?? "");
   const title = String(body?.title ?? "").slice(0, 300);
@@ -539,7 +554,9 @@ export async function titleSession(
     .where(and(eq(sessions.id, sessionId), eq(sessions.accountEmail, email), isNull(sessions.summarizedAt)))
     .returning({ id: sessions.id });
   if (!updated.length) return { error: "not_found" };
-  await insertEvent(db, systemEvent(subject, "session.titled", title, keyOf(title)));
+  const event = systemEvent(subject, "session.titled", title, keyOf(title));
+  await insertEvent(db, event);
+  notify?.(event);
   return { titled: sessionId };
 }
 
@@ -551,6 +568,7 @@ export async function enrichSession(
   db: DB,
   email: string,
   body: any,
+  notify?: EventSink,
 ): Promise<{ error?: string; enriched?: string }> {
   const rawSessionId = String(body?.sessionId ?? "");
   if (!rawSessionId) return { error: "sessionId required" };
@@ -604,7 +622,9 @@ export async function enrichSession(
   const subject = await eventSubject(db, email, sessionId);
   if (subject) {
     const digest = String(body?.summary ?? body?.title ?? "The session was summarized.");
-    await insertEvent(db, systemEvent(subject, "session.summarized", digest, String(now.getTime())));
+    const event = systemEvent(subject, "session.summarized", digest, String(now.getTime()));
+    await insertEvent(db, event);
+    notify?.(event);
   }
   return { enriched: sessionId };
 }
@@ -633,6 +653,7 @@ export async function startSession(
     provider?: string | null;
     meta?: Partial<SessionMeta>;
   },
+  notify?: EventSink,
 ): Promise<{ machineId: string; sessionId: string }> {
   const now = new Date();
   const machineId = `${email}::${p.machineId}`;
@@ -689,7 +710,9 @@ export async function startSession(
 
   const subject = await eventSubject(db, email, sessionId);
   if (subject) {
-    await insertEvent(db, systemEvent(subject, "session.started", p.title || "A session started."));
+    const event = systemEvent(subject, "session.started", p.title || "A session started.");
+    await insertEvent(db, event);
+    notify?.(event);
   }
   return { machineId, sessionId };
 }

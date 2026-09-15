@@ -57,6 +57,10 @@ export type EventInput = {
   body: string;
 };
 
+// A write that inserts an event reports it here rather than telling anyone itself: the
+// Durable Object owns the watch sockets, and the store has no way to reach them.
+export type EventSink = (event: EventInput) => void;
+
 export function eventRow(input: EventInput) {
   return {
     accountEmail: input.accountEmail,
@@ -232,7 +236,7 @@ const ID_BATCH = 80;
 // An unclaimed assignment is otherwise silent forever: the deputy that never saw it
 // reports nothing, so only this pass can close the launch. The key makes the close
 // idempotent, so a cron that runs twice over the same launch still writes one event.
-export async function expireStaleLaunches(db: DB): Promise<{ expired: number }> {
+export async function expireStaleLaunches(db: DB, notify?: EventSink): Promise<{ expired: number }> {
   const cutoff = new Date(Date.now() - CLAIM_WINDOW_MS);
   const assignments = await db
     .select()
@@ -258,7 +262,7 @@ export async function expireStaleLaunches(db: DB): Promise<{ expired: number }> 
   let expired = 0;
   for (const assignment of assignments) {
     if (settled.has(assignment.launch as string)) continue;
-    await insertEvent(db, {
+    const input: EventInput = {
       accountEmail: assignment.accountEmail,
       project: assignment.project,
       type: EXPIRY_TYPE,
@@ -269,7 +273,9 @@ export async function expireStaleLaunches(db: DB): Promise<{ expired: number }> 
       recipient: assignment.recipient,
       launch: assignment.launch,
       body: JSON.stringify({ note: EXPIRY_NOTE }),
-    });
+    };
+    await insertEvent(db, input);
+    notify?.(input);
     expired += 1;
   }
   return { expired };

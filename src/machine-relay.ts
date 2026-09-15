@@ -1,5 +1,6 @@
 import type { Bindings } from "./live-state.ts";
 import type { FleetScope } from "./identity.ts";
+import { nudgeFrame } from "./notify.ts";
 import {
   errorFrame,
   MAX_FRAME,
@@ -18,12 +19,24 @@ type Attachment = { machine: string; scopes: FleetScope[] };
 // client socket, and frames pass between them. Nothing is written: a thread and its
 // transcript exist only on the machine, and thread/items/list reads them when asked.
 export class MachineRelay {
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Bindings,
-  ) {}
+  private readonly ctx: DurableObjectState;
+  private readonly env: Bindings;
+
+  // Plain fields rather than constructor parameter properties: the tests import this
+  // module under Node's strip-only TypeScript loader, which rejects those.
+  constructor(ctx: DurableObjectState, env: Bindings) {
+    this.ctx = ctx;
+    this.env = env;
+  }
 
   async fetch(request: Request): Promise<Response> {
+    // A nudge is an ordinary POST, so it is answered before the upgrade check below. The
+    // public worker forwards nothing but /api/*, so this path is unreachable from outside.
+    if (new URL(request.url).pathname === "/internal/nudge" && request.method === "POST") {
+      const body: any = await request.json().catch(() => ({}));
+      this.toSource(nudgeFrame(String(body?.recipient ?? "")));
+      return new Response(JSON.stringify({ ok: true }), { headers: { "content-type": "application/json" } });
+    }
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response(JSON.stringify({ error: "the relay object takes a websocket" }), {
         status: 426,
