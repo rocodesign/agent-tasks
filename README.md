@@ -25,7 +25,6 @@ src/
   db/
     schema.ts       accounts / api_keys / verification / machines / machine_processes / sessions / tasks / dismissals / events
     client.ts       the ONLY driver touch point (swap to migrate vendors)
-ui/                 Vite + React + Tailwind dashboard -> builds to ui/dist
 drizzle/            SQLite migrations, applied with `wrangler d1 migrations apply`
 ```
 
@@ -123,17 +122,15 @@ Optional environment variables:
 ## Setup
 
 ```sh
-# 1. install deps (worker + ui)
+# 1. install deps
 npm install
-npm run ui:install
 
 # 2. create the archive tables in the local D1
 npm run db:generate       # generate SQL migration from schema
 npm run db:migrate:local  # apply it to .wrangler local state
 
-# 3. run locally (two terminals)
+# 3. run locally
 npm run dev             # wrangler dev  -> http://localhost:8787  (API)
-npm run ui:dev          # vite          -> http://localhost:5173  (UI, proxies /api)
 ```
 
 Local env lives in `.dev.vars` (worker runtime: `RESEND_API_KEY`, `RESEND_FROM`,

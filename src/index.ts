@@ -349,13 +349,12 @@ app.all("/api/*", (c) => {
   const object = c.env.LIVE_STATE.get(c.env.LIVE_STATE.idFromName("fleet"));
   return object.fetch(c.req.raw);
 });
-app.get("*", (c) => c.env.ASSETS.fetch(c.req.raw));
 
 export { LiveState, MachineRelay };
 export default {
   fetch: app.fetch,
-  // Cron: reap silent sessions (Codex never fires SessionEnd), prune the live tree,
-  // and flush the archive queue. /internal/* is not reachable through fetch above.
+  // No [triggers] cron here any more: sidus-shell owns the Durable Objects and runs the
+  // maintenance sweep. The handler stays so a rollback only needs the trigger back.
   scheduled(_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) {
     const object = env.LIVE_STATE.get(env.LIVE_STATE.idFromName("fleet"));
     ctx.waitUntil(object.fetch(new Request("https://live-state/internal/maintenance", { method: "POST" })));

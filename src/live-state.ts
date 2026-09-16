@@ -61,7 +61,6 @@ export type Bindings = {
   AI_SEARCH?: string;
   LIVE_STATE: DurableObjectNamespace;
   RELAY: DurableObjectNamespace;
-  ASSETS: Fetcher;
 };
 
 type LiveTask = {

@@ -6,28 +6,31 @@ compatibility_flags = ["nodejs_compat"]
 # https://sidus.copaciu.com/api/fleet, which dispatches over its service binding.
 workers_dev = false
 
-# Maintenance: reap silent sessions, prune live state, flush the archive queue.
-[triggers]
-crons = ["*/30 * * * *"]
+# Both Durable Object namespaces were transferred to sidus-shell, which now owns their
+# stored data and runs their code. The classes stay in src/ so this Worker keeps building,
+# but the bindings below reach across to sidus-shell. The transfer is one way: never put
+# a [[migrations]] block back, and never declare these classes live here again.
+[exports.LiveState]
+type = "durable-object"
+state = "transferred"
+transferred_to = "sidus-shell"
+
+[exports.MachineRelay]
+type = "durable-object"
+state = "transferred"
+transferred_to = "sidus-shell"
 
 [[durable_objects.bindings]]
 name = "LIVE_STATE"
 class_name = "LiveState"
+script_name = "sidus-shell"
 
 # One relay per machine, carrying console frames to that machine's Codex app server. It
-# writes nothing and hibernates between turns. The class is declared SQLite-backed because
-# the plan allows no other kind, not because it keeps anything.
+# writes nothing and hibernates between turns.
 [[durable_objects.bindings]]
 name = "RELAY"
 class_name = "MachineRelay"
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["LiveState"]
-
-[[migrations]]
-tag = "v2"
-new_sqlite_classes = ["MachineRelay"]
+script_name = "sidus-shell"
 
 # Archive tier. Schema lives in drizzle/; apply with npm run db:migrate:remote.
 [[d1_databases]]
@@ -57,12 +60,6 @@ RESEND_FROM = "Fleet <fleet@copaciu.com>"
 ALLOWED_EMAILS = "romeo@copaciu.com"
 SHELL_URL = "https://sidus.copaciu.com"
 AI_SEARCH = "majordomo-search"
-
-# Static UI (Vite build output). Served for any path that is not /api/*.
-[assets]
-directory = "./ui/dist"
-binding = "ASSETS"
-not_found_handling = "single-page-application"
 
 # Secrets are NOT stored here.
 #   local dev  -> .dev.vars
